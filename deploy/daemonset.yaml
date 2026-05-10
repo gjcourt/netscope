@@ -53,6 +53,10 @@ spec:
           securityContext:
             privileged: false
             runAsUser: 0
+            # CAP_SYS_ADMIN widens the syscall surface; pin to the kubelet's
+            # default seccomp filter rather than running unconfined.
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               add:
                 - BPF

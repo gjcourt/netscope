@@ -90,11 +90,18 @@ func run() error {
 		Program:   prog,
 		Attach:    ebpf.AttachTCXIngress,
 	}
-	if ciliumID, found := findProgramByName(ciliumIngressProgName); found {
-		slog.Info("anchoring before cilium ingress program", "name", ciliumIngressProgName, "prog_id", ciliumID)
+	ciliumID, err := findProgramByName(ciliumIngressProgName)
+	switch {
+	case err == nil:
+		slog.Info("anchoring before cilium ingress program", "name", ciliumIngressProgName, "id", ciliumID)
 		opts.Anchor = link.BeforeProgramByID(ciliumID)
-	} else {
+	case errors.Is(err, os.ErrNotExist):
 		slog.Info("no cilium ingress program found; attaching with default ordering")
+	default:
+		// e.g. EPERM if CAP_SYS_ADMIN is missing. Surface it loudly rather
+		// than silently degrading to default ordering — that's exactly the
+		// failure mode this PR is trying to prevent.
+		return fmt.Errorf("discover cilium program: %w", err)
 	}
 
 	tcxLink, err := link.AttachTCX(opts)
@@ -164,22 +171,32 @@ func run() error {
 // first one whose Info().Name matches. Used to anchor our tcx attach against
 // Cilium's ingress program by name (program IDs are not stable across cilium
 // agent restarts, so we resolve fresh at startup).
-func findProgramByName(name string) (ebpf.ProgramID, bool) {
+//
+// Returns os.ErrNotExist when no matching program is loaded (the kernel's
+// BPF_PROG_GET_NEXT_ID surfaces end-of-iteration as ENOENT). Other errors
+// (e.g. EPERM when CAP_SYS_ADMIN is missing) propagate so callers can
+// distinguish "Cilium isn't here" from "we can't see the program list".
+func findProgramByName(name string) (ebpf.ProgramID, error) {
 	var curID ebpf.ProgramID
 	for {
 		nextID, err := ebpf.ProgramGetNextID(curID)
 		if err != nil {
-			return 0, false
+			// ErrNotExist signals end-of-iteration; any other error is
+			// real (permissions, etc.) and the caller needs to see it.
+			return 0, err
 		}
 		prog, err := ebpf.NewProgramFromID(nextID)
 		if err != nil {
+			// Program may have been unloaded between GetNextID and
+			// NewProgramFromID, or we lack permission to open this one.
+			// Skip and continue iterating.
 			curID = nextID
 			continue
 		}
-		info, err := prog.Info()
+		info, infoErr := prog.Info()
 		prog.Close()
-		if err == nil && info.Name == name {
-			return nextID, true
+		if infoErr == nil && info.Name == name {
+			return nextID, nil
 		}
 		curID = nextID
 	}
