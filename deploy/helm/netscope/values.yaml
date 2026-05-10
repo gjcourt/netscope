@@ -1,0 +1,67 @@
+# Default values for the netscope Helm chart.
+
+image:
+  repository: ghcr.io/gjcourt/netscope
+  # tag defaults to .Chart.appVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Name of the host interface to attach the tcx ingress program to.
+# This is the LAN-facing physical NIC (e.g. eno1, eth0). Must exist on
+# every node the DaemonSet schedules to.
+iface: eno1
+
+# Node selection. Empty {} schedules to every node. During Phase 0 / 1
+# bring-up, pin to a single node by hostname:
+#   nodeSelector:
+#     kubernetes.io/hostname: talos-18u-ski
+nodeSelector: {}
+
+tolerations:
+  - operator: Exists
+
+# CAP_SYS_ADMIN is required at startup to enumerate loaded BPF programs
+# (BPF_PROG_GET_NEXT_ID) so we can anchor our tcx attach before Cilium's
+# ingress program. CAP_BPF / CAP_PERFMON / CAP_NET_ADMIN cover the
+# program load + tcx attach themselves.
+capabilities:
+  - BPF
+  - PERFMON
+  - NET_ADMIN
+  - SYS_ADMIN
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+metrics:
+  port: 9101
+  # Expose on the host so a node-local Prometheus can scrape without
+  # going through Service or kube-proxy. Set to 0 to disable.
+  hostPort: 9101
+  # Attach Prometheus scrape annotations on the pod template.
+  scrapeAnnotations: true
+
+serviceAccount:
+  create: true
+  # name overrides the generated SA name; leave empty to use the
+  # release fullname.
+  name: ""
+
+# Extra annotations / labels merged onto the pod template.
+podAnnotations: {}
+podLabels: {}
+
+# Probes hit /healthz on localhost:9101. The agent's /healthz returns
+# 200 unconditionally for now; will track BPF attach state in Phase 1.
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 30
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 2
+  periodSeconds: 5
