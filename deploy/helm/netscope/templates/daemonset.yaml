@@ -52,8 +52,10 @@ spec:
           image: {{ include "netscope.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            {{- with .Values.iface }}
             - name: NETSCOPE_IFACE
-              value: {{ .Values.iface | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

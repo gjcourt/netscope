@@ -20,9 +20,12 @@ image:
 imagePullSecrets: []
 
 # Name of the host interface to attach the tcx ingress program to.
-# This is the LAN-facing physical NIC (e.g. eno1, eth0). Must exist on
-# every node the DaemonSet schedules to.
-iface: eno1
+# Empty (the default) lets the agent discover the IPv4 default-route
+# interface at startup from /proc/net/route — appropriate for
+# heterogeneous nodes whose primary NIC name varies. Set explicitly
+# (e.g. "eno1", "eth0") to pin to a specific NIC; the agent then uses
+# that name as an explicit override and skips discovery.
+iface: ""
 
 # priorityClassName is the PriorityClass for the agent pod. Empty leaves
 # the field unset and the kubelet uses the cluster default. For
