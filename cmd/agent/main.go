@@ -79,6 +79,16 @@ func run() error {
 		return errors.New("map netscope_rx_bytes not found in collection")
 	}
 
+	retransmitProg := coll.Programs["count_tcp_retransmit"]
+	if retransmitProg == nil {
+		return errors.New("program count_tcp_retransmit not found in collection")
+	}
+
+	retransmitMap := coll.Maps["netscope_tcp_retransmits"]
+	if retransmitMap == nil {
+		return errors.New("map netscope_tcp_retransmits not found in collection")
+	}
+
 	// Attach ahead of Cilium's cil_from_netdev so we observe every packet,
 	// not just the ones Cilium leaves with TC_ACT_UNSPEC. link.Head() (sets
 	// BPF_F_BEFORE without a target) does not take effect on this kernel
@@ -113,6 +123,21 @@ func run() error {
 
 	slog.Info("attached", "iface", iface.Name, "ifindex", iface.Index)
 
+	// fentry on tcp_retransmit_skb. The symbol is GPL-only (the BPF
+	// LICENSE string in netscope.bpf.c is "GPL"), and the program type
+	// is Tracing — distinct from the tcx classifier above, so it needs
+	// its own link.AttachTracing call.
+	retransmitLink, err := link.AttachTracing(link.TracingOptions{
+		Program:    retransmitProg,
+		AttachType: ebpf.AttachTraceFEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("attach fentry tcp_retransmit_skb: %w", err)
+	}
+	defer retransmitLink.Close()
+
+	slog.Info("attached fentry", "program", "tcp_retransmit_skb")
+
 	rxBytes := prometheus.NewCounterFunc(
 		prometheus.CounterOpts{
 			Name:        "netscope_rx_bytes_total",
@@ -129,6 +154,27 @@ func run() error {
 		},
 	)
 	prometheus.MustRegister(rxBytes)
+
+	// netscope_tcp_retransmits_total: host-wide retransmit counter. No
+	// per-iface label — retransmits are a per-socket event, not a per-NIC
+	// one, and TCP can pick a different egress NIC than the rx side. The
+	// ServiceMonitor promotes nodename, which is the dimension that matters
+	// for "is one node retransmitting more than its peers".
+	retransmitCounter := prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "netscope_tcp_retransmits_total",
+			Help: "Total TCP retransmits observed via fentry on tcp_retransmit_skb.",
+		},
+		func() float64 {
+			total, err := readPerCPUSum(retransmitMap)
+			if err != nil {
+				slog.Warn("read retransmit map", "err", err)
+				return 0
+			}
+			return float64(total)
+		},
+	)
+	prometheus.MustRegister(retransmitCounter)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
