@@ -77,10 +77,17 @@ func run() error {
 		return errors.New("map netscope_rx_bytes not found in collection")
 	}
 
+	// Attach at the head of the tcx chain so we observe every packet
+	// regardless of what Cilium's program does. Cilium's cil_from_netdev
+	// returns terminal actions (TC_ACT_OK / redirect) for traffic destined
+	// to managed pods, which would skip any program attached at the tail.
+	// We only read skb->len and return TC_ACT_UNSPEC, so running first is
+	// safe and doesn't influence Cilium's policy decisions.
 	tcxLink, err := link.AttachTCX(link.TCXOptions{
 		Interface: iface.Index,
 		Program:   prog,
 		Attach:    ebpf.AttachTCXIngress,
+		Anchor:    link.Head(),
 	})
 	if err != nil {
 		return fmt.Errorf("attach tcx ingress on %s: %w", iface.Name, err)
