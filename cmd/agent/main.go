@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	defaultIface          = "eno1"
 	metricsListenAddr     = ":9101"
 	mapKey                = uint32(0)
 	ciliumIngressProgName = "cil_from_netdev"
+	ifaceEnvVar           = "NETSCOPE_IFACE"
 )
 
 func main() {
@@ -43,14 +43,15 @@ func main() {
 }
 
 func run() error {
-	ifaceName := os.Getenv("NETSCOPE_IFACE")
-	if ifaceName == "" {
-		ifaceName = defaultIface
+	ifaceName, source, err := resolveIface()
+	if err != nil {
+		return err
 	}
+	slog.Info("resolved interface", "iface", ifaceName, "source", source)
 
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
-		return fmt.Errorf("interface %q: %w", ifaceName, err)
+		return fmt.Errorf("interface %q (%s): %w", ifaceName, source, err)
 	}
 
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -165,6 +166,29 @@ func run() error {
 		slog.Warn("server shutdown", "err", err)
 	}
 	return nil
+}
+
+// resolveIface returns the interface name to attach to, along with a short
+// human-readable source ("env" or "default-route") for logging and errors.
+//
+// Resolution order:
+//  1. NETSCOPE_IFACE env var (explicit operator override — the DaemonSet
+//     can set this to pin to a specific NIC name for predictability).
+//  2. The IPv4 default-route interface as read from /proc/net/route.
+//
+// There is intentionally no static fallback: if discovery fails and no
+// override is set, the agent exits with a clear error rather than silently
+// attaching to a wrong or nonexistent interface (the failure mode this work
+// was meant to eliminate).
+func resolveIface() (name, source string, err error) {
+	if v := os.Getenv(ifaceEnvVar); v != "" {
+		return v, "env:" + ifaceEnvVar, nil
+	}
+	iface, err := discoverDefaultRouteIface()
+	if err != nil {
+		return "", "", fmt.Errorf("discover default-route interface (set %s to override): %w", ifaceEnvVar, err)
+	}
+	return iface, "default-route", nil
 }
 
 // findProgramByName iterates loaded BPF programs and returns the ID of the

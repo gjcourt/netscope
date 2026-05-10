@@ -12,7 +12,7 @@ Phase 0 (feasibility spike). See [brainstorm 03-001](https://github.com/gjcourt/
 
 What works today:
 
-- Single tcx/ingress program counting bytes on a configurable host interface (`NETSCOPE_IFACE`, default `eno1`)
+- Single tcx/ingress program counting bytes on a host interface; the agent discovers the IPv4 default-route interface from `/proc/net/route` at startup, with `NETSCOPE_IFACE` as an explicit operator override
 - Per-CPU `BPF_MAP_TYPE_PERCPU_ARRAY` summed at scrape time
 - Single Prometheus counter `netscope_rx_bytes_total{iface=...}` on `:9101/metrics`
 - DaemonSet manifest pinned to one stage worker, hostNetwork, narrow caps (`BPF`, `PERFMON`, `NET_ADMIN`)
