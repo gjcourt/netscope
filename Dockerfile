@@ -25,7 +25,7 @@ RUN clang -O2 -g -Wall -Werror \
     -D__TARGET_ARCH_x86 \
     -I/usr/include/bpf \
     -I/usr/include/x86_64-linux-gnu \
-    -c internal/bpf/netscope.bpf.c \
+    -c internal/bpf/src/netscope.bpf.c \
     -o internal/bpf/netscope.bpf.o
 
 # Build a static Go binary so it runs in distroless static.

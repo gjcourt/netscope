@@ -10,7 +10,7 @@ help:
 bpf: ## Compile BPF object (requires clang + libbpf-dev locally)
 	clang -O2 -g -Wall -Werror -target bpf -D__TARGET_ARCH_x86 \
 	  -I/usr/include/bpf -I/usr/include/x86_64-linux-gnu \
-	  -c internal/bpf/netscope.bpf.c -o internal/bpf/netscope.bpf.o
+	  -c internal/bpf/src/netscope.bpf.c -o internal/bpf/netscope.bpf.o
 
 .PHONY: build
 build: ## Build container image (compiles BPF + Go inside the builder stage)

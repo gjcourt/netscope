@@ -1,8 +1,9 @@
 // Package bpf embeds the compiled BPF object as a byte slice.
 //
-// The BPF source lives next to this file and is compiled to netscope.bpf.o
-// by the Dockerfile builder stage. Local `go build` outside Docker will fail
-// here unless the .o has been produced first via `make bpf`.
+// The BPF C source lives in src/ (kept out of this Go package directory so
+// `go vet` doesn't try to treat it as cgo). It compiles to netscope.bpf.o
+// alongside this file via `make bpf`. Local `go build` outside Docker will
+// fail until the .o is produced.
 package bpf
 
 import _ "embed"
