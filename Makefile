@@ -28,6 +28,14 @@ tidy: ## Update go.mod / go.sum
 test: ## Run unit tests (none yet — placeholder)
 	go test ./...
 
+.PHONY: helm-lint
+helm-lint: ## Lint the netscope Helm chart
+	helm lint deploy/helm/netscope
+
+.PHONY: helm-template
+helm-template: ## Render the chart with default values (smoke test)
+	helm template netscope deploy/helm/netscope --namespace netscope-stage
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -f internal/bpf/*.o

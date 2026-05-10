@@ -1,0 +1,109 @@
+# Default values for the netscope Helm chart.
+
+# nameOverride / fullnameOverride let the operator decouple the rendered
+# resource names from the Helm release name. Leave empty for the default
+# (release-name based) naming.
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/gjcourt/netscope
+  # tag defaults to .Chart.appVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets is a list of secret references for pulling the agent
+# image from a private registry. The default ghcr.io/gjcourt/netscope
+# image is public, so this is empty. Example:
+#   imagePullSecrets:
+#     - name: ghcr-pull
+imagePullSecrets: []
+
+# Name of the host interface to attach the tcx ingress program to.
+# This is the LAN-facing physical NIC (e.g. eno1, eth0). Must exist on
+# every node the DaemonSet schedules to.
+iface: eno1
+
+# priorityClassName is the PriorityClass for the agent pod. Empty leaves
+# the field unset and the kubelet uses the cluster default. For
+# production observability rollouts, set to "system-node-critical" so
+# the agent survives node pressure eviction.
+priorityClassName: ""
+
+# Extra environment variables merged onto the agent container. Use the
+# full Kubernetes EnvVar shape (name + value, or name + valueFrom).
+# Example:
+#   extraEnv:
+#     - name: NETSCOPE_LOG_LEVEL
+#       value: debug
+extraEnv: []
+
+# Node selection. Empty {} schedules to every node. During Phase 0 / 1
+# bring-up, pin to a single node by hostname:
+#   nodeSelector:
+#     kubernetes.io/hostname: talos-18u-ski
+nodeSelector: {}
+
+# Tolerations applied to the DaemonSet pod. The default ([{operator:
+# Exists}]) tolerates every taint, which is appropriate for a per-node
+# agent that should run on control-plane and worker nodes alike. Narrow
+# this list if you want the agent to skip specific tainted nodes.
+tolerations:
+  - operator: Exists
+
+# CAP_SYS_ADMIN is required at startup to enumerate loaded BPF programs
+# (BPF_PROG_GET_NEXT_ID) so we can anchor our tcx attach before Cilium's
+# ingress program. CAP_BPF / CAP_PERFMON / CAP_NET_ADMIN cover the
+# program load + tcx attach themselves.
+capabilities:
+  - BPF
+  - PERFMON
+  - NET_ADMIN
+  - SYS_ADMIN
+
+# Seccomp profile for the agent container. RuntimeDefault narrows the
+# syscall surface that CAP_SYS_ADMIN would otherwise widen. Set to
+# null to omit the field (e.g. on environments where the kubelet's
+# default profile is too restrictive for bpf operations — unlikely on
+# Talos but worth a knob).
+seccompProfile:
+  type: RuntimeDefault
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+metrics:
+  port: 9101
+  # Expose on the host so a node-local Prometheus can scrape without
+  # going through Service or kube-proxy. Set to 0 to disable.
+  hostPort: 9101
+  # Attach Prometheus scrape annotations on the pod template.
+  scrapeAnnotations: true
+
+serviceAccount:
+  create: true
+  # name overrides the generated SA name; leave empty to use the
+  # release fullname.
+  name: ""
+
+# Extra annotations / labels merged onto the pod template.
+podAnnotations: {}
+podLabels: {}
+
+# Probes hit /healthz on localhost:9101. The agent's /healthz returns
+# 200 unconditionally for now; will track BPF attach state in Phase 1.
+# Any field accepted by core.v1.Probe (timeoutSeconds, failureThreshold,
+# successThreshold, ...) can be added under the probe key and will be
+# rendered verbatim.
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 30
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 2
+  periodSeconds: 5

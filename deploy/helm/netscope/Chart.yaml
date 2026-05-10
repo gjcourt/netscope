@@ -1,0 +1,16 @@
+apiVersion: v2
+name: netscope
+description: eBPF-based network traffic analyzer for the Talos homelab
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+sources:
+  - https://github.com/gjcourt/netscope
+maintainers:
+  - name: gjcourt
+keywords:
+  - ebpf
+  - networking
+  - prometheus
+  - tcx
+  - cilium
