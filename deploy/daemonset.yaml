@@ -53,11 +53,20 @@ spec:
           securityContext:
             privileged: false
             runAsUser: 0
+            # CAP_SYS_ADMIN widens the syscall surface; pin to the kubelet's
+            # default seccomp filter rather than running unconfined.
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               add:
                 - BPF
                 - PERFMON
                 - NET_ADMIN
+                # SYS_ADMIN is required for bpf(BPF_PROG_GET_NEXT_ID),
+                # which the agent uses at startup to discover Cilium's
+                # ingress program for tcx anchor placement. The plan
+                # noted this as a likely requirement on Talos.
+                - SYS_ADMIN
               drop:
                 - ALL
           volumeMounts:
