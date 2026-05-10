@@ -26,3 +26,6 @@ coverage.txt
 # Local env
 .env
 .env.local
+
+# Per-session git worktrees
+.worktrees/
