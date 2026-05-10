@@ -16,6 +16,7 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- if or .Values.metrics.scrapeAnnotations .Values.podAnnotations }}
       annotations:
         {{- if .Values.metrics.scrapeAnnotations }}
         prometheus.io/scrape: "true"
@@ -25,11 +26,19 @@ spec:
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "netscope.serviceAccountName" . }}
       hostNetwork: true
       hostPID: false
       dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -45,6 +54,9 @@ spec:
           env:
             - name: NETSCOPE_IFACE
               value: {{ .Values.iface | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
@@ -81,8 +93,9 @@ spec:
               path: /healthz
               port: {{ .Values.metrics.port }}
               host: 127.0.0.1
-            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
-            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            {{- range $k, $v := omit .Values.livenessProbe "enabled" }}
+            {{ $k }}: {{ $v }}
+            {{- end }}
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
           readinessProbe:
@@ -90,8 +103,9 @@ spec:
               path: /healthz
               port: {{ .Values.metrics.port }}
               host: 127.0.0.1
-            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
-            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            {{- range $k, $v := omit .Values.readinessProbe "enabled" }}
+            {{ $k }}: {{ $v }}
+            {{- end }}
           {{- end }}
       volumes:
         - name: bpffs

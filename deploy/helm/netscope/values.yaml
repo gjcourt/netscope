@@ -1,15 +1,42 @@
 # Default values for the netscope Helm chart.
 
+# nameOverride / fullnameOverride let the operator decouple the rendered
+# resource names from the Helm release name. Leave empty for the default
+# (release-name based) naming.
+nameOverride: ""
+fullnameOverride: ""
+
 image:
   repository: ghcr.io/gjcourt/netscope
   # tag defaults to .Chart.appVersion when empty
   tag: ""
   pullPolicy: IfNotPresent
 
+# imagePullSecrets is a list of secret references for pulling the agent
+# image from a private registry. The default ghcr.io/gjcourt/netscope
+# image is public, so this is empty. Example:
+#   imagePullSecrets:
+#     - name: ghcr-pull
+imagePullSecrets: []
+
 # Name of the host interface to attach the tcx ingress program to.
 # This is the LAN-facing physical NIC (e.g. eno1, eth0). Must exist on
 # every node the DaemonSet schedules to.
 iface: eno1
+
+# priorityClassName is the PriorityClass for the agent pod. Empty leaves
+# the field unset and the kubelet uses the cluster default. For
+# production observability rollouts, set to "system-node-critical" so
+# the agent survives node pressure eviction.
+priorityClassName: ""
+
+# Extra environment variables merged onto the agent container. Use the
+# full Kubernetes EnvVar shape (name + value, or name + valueFrom).
+# Example:
+#   extraEnv:
+#     - name: NETSCOPE_LOG_LEVEL
+#       value: debug
+extraEnv: []
 
 # Node selection. Empty {} schedules to every node. During Phase 0 / 1
 # bring-up, pin to a single node by hostname:
@@ -17,6 +44,10 @@ iface: eno1
 #     kubernetes.io/hostname: talos-18u-ski
 nodeSelector: {}
 
+# Tolerations applied to the DaemonSet pod. The default ([{operator:
+# Exists}]) tolerates every taint, which is appropriate for a per-node
+# agent that should run on control-plane and worker nodes alike. Narrow
+# this list if you want the agent to skip specific tainted nodes.
 tolerations:
   - operator: Exists
 
@@ -65,6 +96,9 @@ podLabels: {}
 
 # Probes hit /healthz on localhost:9101. The agent's /healthz returns
 # 200 unconditionally for now; will track BPF attach state in Phase 1.
+# Any field accepted by core.v1.Probe (timeoutSeconds, failureThreshold,
+# successThreshold, ...) can be added under the probe key and will be
+# rendered verbatim.
 livenessProbe:
   enabled: true
   initialDelaySeconds: 10
