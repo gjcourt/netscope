@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -30,6 +31,14 @@ const (
 	mapKey                = uint32(0)
 	ciliumIngressProgName = "cil_from_netdev"
 	ifaceEnvVar           = "NETSCOPE_IFACE"
+
+	// srttNumBuckets must match NETSCOPE_SRTT_NUM_BUCKETS in netscope.bpf.c;
+	// we assert this at startup against the loaded map's MaxEntries. The
+	// kernel stores srtt_us as actual_µs * 8, so the 24 buckets bucket the
+	// scaled value [2^0, 2^24) — real RTT coverage is 0.125µs through
+	// overflow at ~1.05s (bucket 23's upper le ≈ 2.1s, captures everything
+	// at or above that).
+	srttNumBuckets = 24
 )
 
 func main() {
@@ -89,6 +98,23 @@ func run() error {
 		return errors.New("map netscope_tcp_retransmits not found in collection")
 	}
 
+	srttProg := coll.Programs["record_tcp_srtt"]
+	if srttProg == nil {
+		return errors.New("program record_tcp_srtt not found in collection")
+	}
+
+	srttMap := coll.Maps["netscope_tcp_srtt_buckets"]
+	if srttMap == nil {
+		return errors.New("map netscope_tcp_srtt_buckets not found in collection")
+	}
+	// Guard against drift between the Go-side constant and the BPF-side
+	// #define. If they diverge, the collector either misses buckets or
+	// loops past max_entries and surfaces "lookup bucket N: ENOENT" warns
+	// on every scrape — fail loudly at startup instead.
+	if got := srttMap.MaxEntries(); got != srttNumBuckets {
+		return fmt.Errorf("srtt bucket count drift: bpf map max_entries=%d, go srttNumBuckets=%d", got, srttNumBuckets)
+	}
+
 	// Attach ahead of Cilium's cil_from_netdev so we observe every packet,
 	// not just the ones Cilium leaves with TC_ACT_UNSPEC. link.Head() (sets
 	// BPF_F_BEFORE without a target) does not take effect on this kernel
@@ -138,6 +164,20 @@ func run() error {
 
 	slog.Info("attached fentry", "program", "tcp_retransmit_skb")
 
+	// fentry on tcp_rcv_established for the SRTT histogram. Same Tracing
+	// program-type machinery as the retransmit counter above, so it needs
+	// its own AttachTracing call and its own link to close on shutdown.
+	srttLink, err := link.AttachTracing(link.TracingOptions{
+		Program:    srttProg,
+		AttachType: ebpf.AttachTraceFEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("attach fentry tcp_rcv_established: %w", err)
+	}
+	defer srttLink.Close()
+
+	slog.Info("attached fentry", "program", "tcp_rcv_established")
+
 	rxBytes := prometheus.NewCounterFunc(
 		prometheus.CounterOpts{
 			Name:        "netscope_rx_bytes_total",
@@ -175,6 +215,17 @@ func run() error {
 		},
 	)
 	prometheus.MustRegister(retransmitCounter)
+
+	prometheus.MustRegister(&srttHistogramCollector{
+		m: srttMap,
+		desc: prometheus.NewDesc(
+			"netscope_tcp_srtt_microseconds",
+			"TCP smoothed-RTT histogram observed via fentry on tcp_rcv_established. "+
+				"Buckets are powers of two on the kernel's scaled srtt_us value "+
+				"(actual µs × 8); le labels are converted to seconds.",
+			nil, nil,
+		),
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -270,6 +321,81 @@ func findProgramByName(name string) (ebpf.ProgramID, error) {
 		}
 		curID = nextID
 	}
+}
+
+// srttHistogramCollector exposes the BPF-side per-CPU log2 histogram of
+// SRTT samples as a Prometheus histogram metric.
+//
+// The BPF map holds NETSCOPE_SRTT_NUM_BUCKETS per-CPU u64 counters keyed by
+// bucket index. We read all of them at scrape time, sum across CPUs into a
+// dense []uint64, then emit cumulative `le` buckets — Prometheus expects
+// bucket counts to be monotonically non-decreasing across le boundaries.
+//
+// The kernel stores srtt as actual_microseconds * 8 and we bucket on that
+// scaled value, so bucket i corresponds to scaled values in [2^i, 2^(i+1)).
+// In real-µs terms that's [2^i / 8, 2^(i+1) / 8) µs, and the le boundary we
+// emit is the upper bound of that range in *seconds*. We label `le` with the
+// upper-edge actual-time in seconds: le_seconds = (2^(i+1) / 8) / 1e6.
+//
+// _sum is reported as 0 — we don't keep a side u64 counter for the sum yet
+// (kept out of scope to keep this PR small). Histogram _bucket and _count
+// are still useful: rate(), quantile estimation via histogram_quantile, and
+// "did this distribution shift" alerting all work without _sum.
+type srttHistogramCollector struct {
+	m    *ebpf.Map
+	desc *prometheus.Desc
+}
+
+func (c *srttHistogramCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.desc
+}
+
+func (c *srttHistogramCollector) Collect(ch chan<- prometheus.Metric) {
+	totals, err := readPerCPUSlice(c.m, srttNumBuckets)
+	if err != nil {
+		// Surface the failure to Prometheus rather than silently dropping
+		// the metric — a silent zero scrape looks identical to "no SRTT
+		// samples yet", which is the wrong story to tell during an outage.
+		slog.Warn("read srtt map", "err", err)
+		ch <- prometheus.NewInvalidMetric(c.desc, err)
+		return
+	}
+
+	// Build cumulative buckets keyed by upper-edge `le` in seconds.
+	// Bucket i covers scaled srtt_us in [2^i, 2^(i+1)). Real µs = scaled/8,
+	// so the upper bound in seconds is 2^(i+1) / 8 / 1e6.
+	buckets := make(map[float64]uint64, srttNumBuckets)
+	var cumulative, count uint64
+	for i := 0; i < srttNumBuckets; i++ {
+		cumulative += totals[i]
+		le := math.Ldexp(1, i+1) / 8.0 / 1e6 // (2^(i+1) / 8) / 1e6 seconds
+		buckets[le] = cumulative
+		count += totals[i]
+	}
+
+	ch <- prometheus.MustNewConstHistogram(
+		c.desc,
+		count,
+		0, // sum not tracked yet — see type doc.
+		buckets,
+	)
+}
+
+func readPerCPUSlice(m *ebpf.Map, n int) ([]uint64, error) {
+	out := make([]uint64, n)
+	cpuCount := ebpf.MustPossibleCPU()
+	perCPU := make([]uint64, cpuCount)
+	for i := uint32(0); i < uint32(n); i++ {
+		if err := m.Lookup(i, &perCPU); err != nil {
+			return nil, fmt.Errorf("lookup bucket %d: %w", i, err)
+		}
+		var sum uint64
+		for _, v := range perCPU {
+			sum += v
+		}
+		out[i] = sum
+	}
+	return out, nil
 }
 
 func readPerCPUSum(m *ebpf.Map) (uint64, error) {
