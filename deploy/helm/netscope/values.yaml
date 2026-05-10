@@ -30,6 +30,14 @@ capabilities:
   - NET_ADMIN
   - SYS_ADMIN
 
+# Seccomp profile for the agent container. RuntimeDefault narrows the
+# syscall surface that CAP_SYS_ADMIN would otherwise widen. Set to
+# null to omit the field (e.g. on environments where the kubelet's
+# default profile is too restrictive for bpf operations — unlikely on
+# Talos but worth a knob).
+seccompProfile:
+  type: RuntimeDefault
+
 resources:
   requests:
     cpu: 50m

@@ -55,6 +55,10 @@ spec:
           securityContext:
             privileged: false
             runAsUser: 0
+            {{- if .Values.seccompProfile }}
+            seccompProfile:
+              {{- toYaml .Values.seccompProfile | nindent 14 }}
+            {{- end }}
             capabilities:
               add:
                 {{- range .Values.capabilities }}
