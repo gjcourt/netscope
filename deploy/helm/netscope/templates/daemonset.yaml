@@ -93,9 +93,7 @@ spec:
               path: /healthz
               port: {{ .Values.metrics.port }}
               host: 127.0.0.1
-            {{- range $k, $v := omit .Values.livenessProbe "enabled" }}
-            {{ $k }}: {{ $v }}
-            {{- end }}
+            {{- toYaml (omit .Values.livenessProbe "enabled") | nindent 12 }}
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
           readinessProbe:
@@ -103,9 +101,7 @@ spec:
               path: /healthz
               port: {{ .Values.metrics.port }}
               host: 127.0.0.1
-            {{- range $k, $v := omit .Values.readinessProbe "enabled" }}
-            {{ $k }}: {{ $v }}
-            {{- end }}
+            {{- toYaml (omit .Values.readinessProbe "enabled") | nindent 12 }}
           {{- end }}
       volumes:
         - name: bpffs
