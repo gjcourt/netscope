@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -146,7 +145,12 @@ func run() error {
 }
 
 func readPerCPUSum(m *ebpf.Map) (uint64, error) {
-	perCPU := make([]uint64, runtime.NumCPU())
+	// BPF per-CPU maps are sized by the kernel's nr_cpu_ids (i.e. all
+	// possible CPUs including offline/hot-plug slots). runtime.NumCPU()
+	// reflects what Go sees, which on cgroup-restricted or hot-plug
+	// systems may differ from the kernel's view and silently truncate
+	// the lookup. ebpf.MustPossibleCPU() returns the right size.
+	perCPU := make([]uint64, ebpf.MustPossibleCPU())
 	if err := m.Lookup(mapKey, &perCPU); err != nil {
 		return 0, err
 	}

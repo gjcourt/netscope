@@ -35,7 +35,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 # Runtime: static distroless. The agent reads /sys/fs/bpf and /sys/kernel/btf
 # from host mounts; nothing else is needed at runtime.
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+#
+# Runs as root (uid 0) so the kernel grants the BPF/PERFMON/NET_ADMIN caps
+# requested by the DaemonSet. Phase 1+ may move to a non-root uid once we
+# verify tcx attach works without root on this Talos kernel.
+FROM gcr.io/distroless/static-debian12:latest AS runtime
 
 COPY --from=builder /out/netscope-agent /netscope-agent
 
