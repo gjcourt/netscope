@@ -26,9 +26,10 @@ import (
 )
 
 const (
-	defaultIface      = "eno1"
-	metricsListenAddr = ":9101"
-	mapKey            = uint32(0)
+	defaultIface          = "eno1"
+	metricsListenAddr     = ":9101"
+	mapKey                = uint32(0)
+	ciliumIngressProgName = "cil_from_netdev"
 )
 
 func main() {
@@ -77,18 +78,33 @@ func run() error {
 		return errors.New("map netscope_rx_bytes not found in collection")
 	}
 
-	// Attach at the head of the tcx chain so we observe every packet
-	// regardless of what Cilium's program does. Cilium's cil_from_netdev
-	// returns terminal actions (TC_ACT_OK / redirect) for traffic destined
-	// to managed pods, which would skip any program attached at the tail.
-	// We only read skb->len and return TC_ACT_UNSPEC, so running first is
-	// safe and doesn't influence Cilium's policy decisions.
-	tcxLink, err := link.AttachTCX(link.TCXOptions{
+	// Attach ahead of Cilium's cil_from_netdev so we observe every packet,
+	// not just the ones Cilium leaves with TC_ACT_UNSPEC. link.Head() (sets
+	// BPF_F_BEFORE without a target) does not take effect on this kernel
+	// when another program is already attached, so we discover Cilium's
+	// program ID and anchor against it explicitly. Safe because count_rx
+	// only reads skb->len and returns TC_ACT_UNSPEC; Cilium's policy
+	// decisions are unaffected.
+	opts := link.TCXOptions{
 		Interface: iface.Index,
 		Program:   prog,
 		Attach:    ebpf.AttachTCXIngress,
-		Anchor:    link.Head(),
-	})
+	}
+	ciliumID, err := findProgramByName(ciliumIngressProgName)
+	switch {
+	case err == nil:
+		slog.Info("anchoring before cilium ingress program", "name", ciliumIngressProgName, "id", ciliumID)
+		opts.Anchor = link.BeforeProgramByID(ciliumID)
+	case errors.Is(err, os.ErrNotExist):
+		slog.Info("no cilium ingress program found; attaching with default ordering")
+	default:
+		// e.g. EPERM if CAP_SYS_ADMIN is missing. Surface it loudly rather
+		// than silently degrading to default ordering — that's exactly the
+		// failure mode this PR is trying to prevent.
+		return fmt.Errorf("discover cilium program: %w", err)
+	}
+
+	tcxLink, err := link.AttachTCX(opts)
 	if err != nil {
 		return fmt.Errorf("attach tcx ingress on %s: %w", iface.Name, err)
 	}
@@ -149,6 +165,41 @@ func run() error {
 		slog.Warn("server shutdown", "err", err)
 	}
 	return nil
+}
+
+// findProgramByName iterates loaded BPF programs and returns the ID of the
+// first one whose Info().Name matches. Used to anchor our tcx attach against
+// Cilium's ingress program by name (program IDs are not stable across cilium
+// agent restarts, so we resolve fresh at startup).
+//
+// Returns os.ErrNotExist when no matching program is loaded (the kernel's
+// BPF_PROG_GET_NEXT_ID surfaces end-of-iteration as ENOENT). Other errors
+// (e.g. EPERM when CAP_SYS_ADMIN is missing) propagate so callers can
+// distinguish "Cilium isn't here" from "we can't see the program list".
+func findProgramByName(name string) (ebpf.ProgramID, error) {
+	var curID ebpf.ProgramID
+	for {
+		nextID, err := ebpf.ProgramGetNextID(curID)
+		if err != nil {
+			// ErrNotExist signals end-of-iteration; any other error is
+			// real (permissions, etc.) and the caller needs to see it.
+			return 0, err
+		}
+		prog, err := ebpf.NewProgramFromID(nextID)
+		if err != nil {
+			// Program may have been unloaded between GetNextID and
+			// NewProgramFromID, or we lack permission to open this one.
+			// Skip and continue iterating.
+			curID = nextID
+			continue
+		}
+		info, infoErr := prog.Info()
+		prog.Close()
+		if infoErr == nil && info.Name == name {
+			return nextID, nil
+		}
+		curID = nextID
+	}
 }
 
 func readPerCPUSum(m *ebpf.Map) (uint64, error) {
