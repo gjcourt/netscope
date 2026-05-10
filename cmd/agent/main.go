@@ -32,8 +32,12 @@ const (
 	ciliumIngressProgName = "cil_from_netdev"
 	ifaceEnvVar           = "NETSCOPE_IFACE"
 
-	// srttNumBuckets must match NETSCOPE_SRTT_NUM_BUCKETS in netscope.bpf.c.
-	// 24 buckets of log2(srtt_us) cover 1µs … ~8s (2^23 µs ≈ 8.39s).
+	// srttNumBuckets must match NETSCOPE_SRTT_NUM_BUCKETS in netscope.bpf.c;
+	// we assert this at startup against the loaded map's MaxEntries. The
+	// kernel stores srtt_us as actual_µs * 8, so the 24 buckets bucket the
+	// scaled value [2^0, 2^24) — real RTT coverage is 0.125µs through
+	// overflow at ~1.05s (bucket 23's upper le ≈ 2.1s, captures everything
+	// at or above that).
 	srttNumBuckets = 24
 )
 
@@ -102,6 +106,13 @@ func run() error {
 	srttMap := coll.Maps["netscope_tcp_srtt_buckets"]
 	if srttMap == nil {
 		return errors.New("map netscope_tcp_srtt_buckets not found in collection")
+	}
+	// Guard against drift between the Go-side constant and the BPF-side
+	// #define. If they diverge, the collector either misses buckets or
+	// loops past max_entries and surfaces "lookup bucket N: ENOENT" warns
+	// on every scrape — fail loudly at startup instead.
+	if got := srttMap.MaxEntries(); got != srttNumBuckets {
+		return fmt.Errorf("srtt bucket count drift: bpf map max_entries=%d, go srttNumBuckets=%d", got, srttNumBuckets)
 	}
 
 	// Attach ahead of Cilium's cil_from_netdev so we observe every packet,
@@ -342,7 +353,11 @@ func (c *srttHistogramCollector) Describe(ch chan<- *prometheus.Desc) {
 func (c *srttHistogramCollector) Collect(ch chan<- prometheus.Metric) {
 	totals, err := readPerCPUSlice(c.m, srttNumBuckets)
 	if err != nil {
+		// Surface the failure to Prometheus rather than silently dropping
+		// the metric — a silent zero scrape looks identical to "no SRTT
+		// samples yet", which is the wrong story to tell during an outage.
 		slog.Warn("read srtt map", "err", err)
+		ch <- prometheus.NewInvalidMetric(c.desc, err)
 		return
 	}
 
