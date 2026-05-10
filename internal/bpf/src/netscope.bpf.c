@@ -112,13 +112,20 @@ struct {
 // the previous segment's smoothed value — close enough for a histogram, and
 // avoids an fexit which would cost a return-probe stack frame per packet.
 //
-// CO-RE: BPF_CORE_READ emits a load against the shadowed struct offset,
-// which libbpf rewrites at load time to match the target kernel's actual
+// CO-RE: direct field access through the preserve_access_index struct is
+// rewritten by libbpf at load time against the target kernel's actual
 // tcp_sock->srtt_us offset. No vmlinux.h required.
+//
+// IMPORTANT: fentry/fexit programs MUST use direct memory access, not the
+// BPF_CORE_READ macro. That macro expands to bpf_probe_read_kernel(), which
+// the kernel verifier disallows for this program type — fentry has direct
+// access via function arguments by design, so the probe_read helpers are
+// forbidden. (Verified empirically: BPF_CORE_READ here loads but fails
+// attach with "program of this type cannot use helper bpf_probe_read".)
 SEC("fentry/tcp_rcv_established")
 int BPF_PROG(record_tcp_srtt, void *sk)
 {
-    __u32 srtt_us = BPF_CORE_READ((struct tcp_sock *)sk, srtt_us);
+    __u32 srtt_us = ((struct tcp_sock *)sk)->srtt_us;
     if (srtt_us == 0) {
         // Pre-handshake or freshly reset connection — no SRTT sample yet.
         // Skipping keeps the histogram from being dominated by a bucket-0
