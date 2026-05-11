@@ -225,6 +225,10 @@ int BPF_PROG(record_tcp_srtt, struct sock *sk)
 // practice: stub resolvers ephemeral-port-per-query and the kernel rejects
 // duplicate ports for connected sockets.
 //
+// Option (B) — emitting a ringbuf event with the parsed qname so userspace
+// can label per-domain histograms — is intentionally deferred to a follow-up
+// PR. This PR ships only the aggregate histogram.
+//
 // Coverage limitation: we filter on sk->__sk_common.skc_dport == htons(53),
 // which is populated only for connected UDP sockets (those that called
 // connect() before sendmsg, or that had skc_dport set by connect()-emulating
@@ -236,9 +240,12 @@ int BPF_PROG(record_tcp_srtt, struct sock *sk)
 // netscope_dns_query_starts: hashmap from 4-tuple to start-timestamp (ns).
 // Sized at 8192 entries — DNS query bursts cap naturally well below that,
 // and LRU is not needed because we delete on response. If a query times out
-// without a response, the entry leaks until eviction by hash collision; over
-// time the map fills with stale entries and new queries may fail to insert.
-// At 8192 with ~1s typical query lifetime, this is comfortable headroom.
+// without a response, the entry leaks until the same 4-tuple is reused (we
+// upsert with BPF_ANY on every send, so existing-key updates always succeed).
+// Only *new-key* inserts can fail with -E2BIG, and only once 8192 distinct
+// stale entries accumulate; at ~1s typical query lifetime this is comfortable
+// headroom. We deliberately don't surface the -E2BIG case — losing a single
+// query sample is preferable to noisy logs on a saturated map.
 struct dns_flow_key {
     __be32 saddr;
     __be32 daddr;
@@ -354,13 +361,11 @@ int BPF_PROG(record_dns_response, struct sock *sk, struct msghdr *msg,
         return 0;
     }
     __u64 delta_us = (now - t0) / 1000;
-    if (delta_us == 0) {
-        // Sub-microsecond — fold into bucket 0 explicitly. Otherwise the
-        // log2 loop below would still pick bucket 0, but the value=0 case
-        // is a real signal (localhost responder, cached resolver) worth
-        // counting rather than dropping.
-        delta_us = 1;
-    }
+    // Sub-microsecond samples (localhost responder, cached resolver) fall into
+    // bucket 0 naturally: the log2 loop starts with bucket=0 and only advances
+    // when (v >>= 1) is still non-zero, so delta_us in {0, 1} both leave
+    // bucket=0. No explicit clamp needed — the value=0 case is real signal and
+    // is counted, not dropped.
 
     // Same log2-bucketing loop as the SRTT histogram. See SRTT comment for
     // why we don't use __builtin_clz.
