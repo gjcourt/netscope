@@ -35,17 +35,21 @@ struct tcp_sock {
 } __attribute__((preserve_access_index));
 
 // Verifier-blessed type narrowing. tcp_rcv_established's first argument is
-// typed as struct sock * (size ~1232 bytes) per BTF. The verifier refuses
-// to read srtt_us via a plain (struct tcp_sock *)sk cast because that offset
-// (~1672 bytes) is "beyond struct sock" from the verifier's perspective —
+// BTF-typed as struct sock * (size ~1232 bytes on Talos 6.18.9, varies by
+// kernel). The verifier refuses to read srtt_us via a plain
+// (struct tcp_sock *)sk cast because that offset (~1672 bytes on this
+// kernel) lies beyond sizeof(struct sock) from the verifier's perspective —
 // even though tcp_sock embeds struct sock as its first member in actual
 // memory layout, the BPF type system has no way to know that.
 //
-// bpf_skc_to_tcp_sock (helper #137, already declared by bpf_helper_defs.h
-// which is pulled in transitively via bpf_helpers.h above) checks at runtime
-// that the sock is a TCP stream socket and returns a struct tcp_sock * (or
-// NULL). The helper proto's return type tells the verifier the returned
-// pointer is genuinely tcp_sock-typed, so the srtt_us field load is legal.
+// bpf_skc_to_tcp_sock is a BTF-typed kernel function (libbpf surfaces it
+// via bpf_helper_defs.h, which bpf_helpers.h includes above). It checks at
+// runtime that the sock is a TCP stream socket and returns a
+// struct tcp_sock * (or NULL). The function's return BTF tells the
+// verifier the returned pointer is genuinely tcp_sock-typed, so the
+// srtt_us field load is legal. In practice the NULL path is essentially
+// unreachable from tcp_rcv_established (which is only called on
+// established fullsocks), but the verifier still requires us to handle it.
 
 // netscope_rx_bytes: per-CPU byte counter, single key (0). Userspace sums
 // across all possible CPUs at scrape time. Counter only — no eviction.
