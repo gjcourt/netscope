@@ -41,12 +41,11 @@ struct tcp_sock {
 // even though tcp_sock embeds struct sock as its first member in actual
 // memory layout, the BPF type system has no way to know that.
 //
-// bpf_skc_to_tcp_sock checks at runtime that the sock is a TCP stream
-// socket and returns a struct tcp_sock * (or NULL). Its return BTF tells
-// the verifier the returned pointer is genuinely tcp_sock-typed, so the
-// srtt_us field load becomes legal. __ksym tells libbpf to resolve the
-// symbol from the running kernel's BTF at load time.
-extern struct tcp_sock *bpf_skc_to_tcp_sock(struct sock *sk) __ksym;
+// bpf_skc_to_tcp_sock (helper #137, already declared by bpf_helper_defs.h
+// which is pulled in transitively via bpf_helpers.h above) checks at runtime
+// that the sock is a TCP stream socket and returns a struct tcp_sock * (or
+// NULL). The helper proto's return type tells the verifier the returned
+// pointer is genuinely tcp_sock-typed, so the srtt_us field load is legal.
 
 // netscope_rx_bytes: per-CPU byte counter, single key (0). Userspace sums
 // across all possible CPUs at scrape time. Counter only — no eviction.
