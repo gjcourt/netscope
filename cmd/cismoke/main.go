@@ -69,8 +69,20 @@ func main() {
 }
 
 func run() error {
+	// RemoveMemlock is a no-op on kernels >= 5.11, which charge BPF memory
+	// against memcg rather than RLIMIT_MEMLOCK. The vmtest kernel here is
+	// 6.18 (matches Talos production), so we don't need it for the load to
+	// succeed. Production Talos nodes are also >= 5.11.
+	//
+	// We still call it because the cilium/ebpf rlimit helper is conservative
+	// and will downgrade RLIMIT_MEMLOCK on older kernels if anyone ever runs
+	// this binary outside CI. But its memcg-detection probe trips on the
+	// minimal vmtest initramfs ("function not implemented") even though
+	// cgroup2 is mounted — the kernel image lacks the per-cgroup memory
+	// controller config. Log and continue rather than abort: the subsequent
+	// NewCollection call is the real load test and will report the truth.
 	if err := rlimit.RemoveMemlock(); err != nil {
-		return fmt.Errorf("remove memlock: %w", err)
+		fmt.Fprintf(os.Stderr, "cismoke: rlimit.RemoveMemlock failed (continuing, kernel >= 5.11 doesn't need it): %v\n", err)
 	}
 
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(netscopebpf.Object))
