@@ -20,6 +20,10 @@ build: ## Build container image (compiles BPF + Go inside the builder stage)
 push: ## Push image to registry
 	docker push $(IMAGE):$(TAG)
 
+.PHONY: cismoke
+cismoke: bpf ## Build the kernel-load smoke binary (CGO-free static binary)
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/cismoke ./cmd/cismoke
+
 .PHONY: tidy
 tidy: ## Update go.mod / go.sum
 	go mod tidy

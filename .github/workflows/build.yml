@@ -61,6 +61,70 @@ jobs:
       - name: helm template (smoke render)
         run: helm template netscope deploy/helm/netscope --namespace netscope-stage > /dev/null
 
+  # kernel-smoke: load the compiled BPF .o against a real kernel in a VM and
+  # attempt each attach the production agent performs. Catches verifier
+  # rejections that the compile-only `lint` job above cannot see — see
+  # docs/postmortems/2026-05-10-srtt-verifier-iterations.md for the trap this
+  # exists to plug.
+  #
+  # Pinned to bzImage-v6.18-default from danobi/vmtest's test_assets. The
+  # production Talos nodes ship 6.18.x, and 6.18 includes every kernel symbol
+  # the agent traces (tcx is 6.6+, tcp_rcv_established and udp_recvmsg are
+  # long-standing GPL exports). If the kernel rename-shuffle ever drops one
+  # of those symbols the smoke surfaces it as a clear AttachTracing failure
+  # rather than a silent CI green / production red.
+  kernel-smoke:
+    needs: lint
+    runs-on: ubuntu-latest
+    # Guard against vmtest hangs (kernel panic in init, command that never
+    # returns) which would otherwise consume the full GHA 6h default. The
+    # smoke itself is sub-second; 10m is generous for boot + setup overhead.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Install BPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libbpf-dev linux-libc-dev
+
+      - name: Compile BPF object
+        run: make bpf
+
+      - name: Build cismoke binary
+        # Static binary so it runs against whatever libc (if any) the vmtest
+        # rootfs ships with. CGO is already off for cilium/ebpf builds but be
+        # explicit so a future toolchain default doesn't break the VM run.
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 go build \
+            -ldflags="-s -w" \
+            -o bin/cismoke \
+            ./cmd/cismoke
+
+      - name: Run kernel-load smoke (vmtest)
+        uses: danobi/vmtest-action@v0.9
+        with:
+          # bzImage-v6.18-fedora38 — 6.18 matches Talos 6.18.x in production,
+          # and the fedora38 flavor is built with CONFIG_DEBUG_INFO_BTF=y so
+          # fentry/fexit programs (which need kernel BTF to resolve struct
+          # field offsets) and maps using BTF_KIND_DATASEC actually load.
+          # The "-default" flavor is a minimal kernel without BTF and rejects
+          # any fentry attach with "function not implemented" before the
+          # verifier even sees the program. If this URL 404s, fall back to
+          # other vmtest-managed kernel images listed at
+          # https://github.com/danobi/vmtest/releases/tag/test_assets
+          kernel_url: https://github.com/danobi/vmtest/releases/download/test_assets/bzImage-v6.18-fedora38
+          # Absolute path; vmtest-action mirrors the host workspace into the
+          # guest, so $GITHUB_WORKSPACE resolves the same way inside the VM.
+          command: ${{ github.workspace }}/bin/cismoke
+
   image:
     needs: lint
     runs-on: ubuntu-latest
