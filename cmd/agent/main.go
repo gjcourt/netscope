@@ -39,6 +39,12 @@ const (
 	// overflow at ~1.05s (bucket 23's upper le ≈ 2.1s, captures everything
 	// at or above that).
 	srttNumBuckets = 24
+
+	// dnsNumBuckets must match NETSCOPE_DNS_NUM_BUCKETS in netscope.bpf.c.
+	// Same shape as srttNumBuckets: 24 log2 buckets, last is overflow. Bucket
+	// i covers delta_us in [2^i, 2^(i+1)); the le boundary we emit is the
+	// upper bound in *seconds* = 2^(i+1) / 1e6. Range: ~2µs through ~16s.
+	dnsNumBuckets = 24
 )
 
 func main() {
@@ -115,6 +121,26 @@ func run() error {
 		return fmt.Errorf("srtt bucket count drift: bpf map max_entries=%d, go srttNumBuckets=%d", got, srttNumBuckets)
 	}
 
+	dnsQueryProg := coll.Programs["record_dns_query"]
+	if dnsQueryProg == nil {
+		return errors.New("program record_dns_query not found in collection")
+	}
+
+	dnsResponseProg := coll.Programs["record_dns_response"]
+	if dnsResponseProg == nil {
+		return errors.New("program record_dns_response not found in collection")
+	}
+
+	dnsLatencyMap := coll.Maps["netscope_dns_latency_buckets"]
+	if dnsLatencyMap == nil {
+		return errors.New("map netscope_dns_latency_buckets not found in collection")
+	}
+	// Same drift guard as srtt: if the BPF #define and Go constant disagree,
+	// fail loudly at startup rather than emit silently-truncated histograms.
+	if got := dnsLatencyMap.MaxEntries(); got != dnsNumBuckets {
+		return fmt.Errorf("dns bucket count drift: bpf map max_entries=%d, go dnsNumBuckets=%d", got, dnsNumBuckets)
+	}
+
 	// Attach ahead of Cilium's cil_from_netdev so we observe every packet,
 	// not just the ones Cilium leaves with TC_ACT_UNSPEC. link.Head() (sets
 	// BPF_F_BEFORE without a target) does not take effect on this kernel
@@ -178,6 +204,36 @@ func run() error {
 
 	slog.Info("attached fentry", "program", "tcp_rcv_established")
 
+	// fentry on udp_sendmsg captures outbound DNS queries (sk->dport == 53).
+	// In-kernel correlation: the BPF program stashes a start timestamp under
+	// a 4-tuple key in netscope_dns_query_starts. See netscope.bpf.c for the
+	// design rationale (4-tuple vs txid, connected-sock-only coverage, etc.).
+	dnsQueryLink, err := link.AttachTracing(link.TracingOptions{
+		Program:    dnsQueryProg,
+		AttachType: ebpf.AttachTraceFEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("attach fentry udp_sendmsg: %w", err)
+	}
+	defer dnsQueryLink.Close()
+
+	slog.Info("attached fentry", "program", "udp_sendmsg")
+
+	// fexit on udp_recvmsg matches inbound responses against the in-flight
+	// query and increments the latency histogram. fexit (rather than fentry)
+	// because we need the return value to distinguish a real datagram copy
+	// from -EAGAIN / -ERESTARTSYS wakeups.
+	dnsResponseLink, err := link.AttachTracing(link.TracingOptions{
+		Program:    dnsResponseProg,
+		AttachType: ebpf.AttachTraceFExit,
+	})
+	if err != nil {
+		return fmt.Errorf("attach fexit udp_recvmsg: %w", err)
+	}
+	defer dnsResponseLink.Close()
+
+	slog.Info("attached fexit", "program", "udp_recvmsg")
+
 	rxBytes := prometheus.NewCounterFunc(
 		prometheus.CounterOpts{
 			Name:        "netscope_rx_bytes_total",
@@ -223,6 +279,22 @@ func run() error {
 			"TCP smoothed-RTT histogram observed via fentry on tcp_rcv_established. "+
 				"Buckets are powers of two on the kernel's scaled srtt_us value "+
 				"(actual µs × 8); le labels are converted to seconds.",
+			nil, nil,
+		),
+	})
+
+	// DNS query latency histogram. Same log2 shape as SRTT but bucketing
+	// directly on real microseconds (no /8 scaling), so the le boundary for
+	// bucket i is 2^(i+1) / 1e6 seconds. Bucket 23 is overflow; everything
+	// >= ~8.4s lands there.
+	prometheus.MustRegister(&dnsLatencyHistogramCollector{
+		m: dnsLatencyMap,
+		desc: prometheus.NewDesc(
+			"netscope_dns_query_microseconds",
+			"DNS query latency histogram. Measured as the wall-clock interval "+
+				"from udp_sendmsg (sk_dport == 53) to a successful udp_recvmsg "+
+				"return on the same 4-tuple. Buckets are powers of two on µs; "+
+				"le labels are converted to seconds.",
 			nil, nil,
 		),
 	})
@@ -369,6 +441,51 @@ func (c *srttHistogramCollector) Collect(ch chan<- prometheus.Metric) {
 	for i := 0; i < srttNumBuckets; i++ {
 		cumulative += totals[i]
 		le := math.Ldexp(1, i+1) / 8.0 / 1e6 // (2^(i+1) / 8) / 1e6 seconds
+		buckets[le] = cumulative
+		count += totals[i]
+	}
+
+	ch <- prometheus.MustNewConstHistogram(
+		c.desc,
+		count,
+		0, // sum not tracked yet — see type doc.
+		buckets,
+	)
+}
+
+// dnsLatencyHistogramCollector exposes the BPF-side per-CPU log2 histogram of
+// DNS query latency samples as a Prometheus histogram metric.
+//
+// Same structure as srttHistogramCollector: read all per-CPU u64 counters,
+// sum across CPUs, emit cumulative `le` buckets in seconds. The only
+// difference from SRTT is the µs↔s conversion — DNS buckets directly on
+// real microseconds (no /8 kernel-scaling), so the le boundary for bucket i
+// is 2^(i+1) / 1e6 seconds. _sum is reported as 0 for the same reason as
+// SRTT (kept out of scope to keep the PR small).
+type dnsLatencyHistogramCollector struct {
+	m    *ebpf.Map
+	desc *prometheus.Desc
+}
+
+func (c *dnsLatencyHistogramCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.desc
+}
+
+func (c *dnsLatencyHistogramCollector) Collect(ch chan<- prometheus.Metric) {
+	totals, err := readPerCPUSlice(c.m, dnsNumBuckets)
+	if err != nil {
+		slog.Warn("read dns latency map", "err", err)
+		ch <- prometheus.NewInvalidMetric(c.desc, err)
+		return
+	}
+
+	buckets := make(map[float64]uint64, dnsNumBuckets)
+	var cumulative, count uint64
+	for i := 0; i < dnsNumBuckets; i++ {
+		cumulative += totals[i]
+		// Bucket i covers delta_us in [2^i, 2^(i+1)); upper bound in seconds
+		// is 2^(i+1) / 1e6. No /8 scaling here, unlike SRTT.
+		le := math.Ldexp(1, i+1) / 1e6
 		buckets[le] = cumulative
 		count += totals[i]
 	}
