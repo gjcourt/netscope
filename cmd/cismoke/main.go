@@ -121,6 +121,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("lookup loopback interface: %w", err)
 	}
+	// Defensive: a zero ifindex would silently send the tcx attach to "any"
+	// and the resulting error is confusing. Real Linux always returns >0 for
+	// `lo`, but guard against an unusual kernel/netns combination here.
+	if loIface.Index == 0 {
+		return fmt.Errorf("loopback interface returned zero ifindex (unexpected on Linux)")
+	}
 
 	steps := []attachStep{
 		{
