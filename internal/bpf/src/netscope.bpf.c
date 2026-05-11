@@ -18,6 +18,11 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+// Forward-declare struct sock. We never read fields from it directly —
+// the pointer flows through bpf_skc_to_tcp_sock to get a verifier-typed
+// tcp_sock. An incomplete declaration is enough for the helper signature.
+struct sock;
+
 // Shadowed kernel struct declaration for CO-RE. We don't include a full
 // vmlinux.h (it'd be ~5-10MB checked into the repo); instead we declare
 // just the one field we touch and let libbpf rewrite the offset at load
@@ -25,16 +30,23 @@ char LICENSE[] SEC("license") = "GPL";
 // the relocation happen — without it the compiler bakes in whatever offset
 // our local declaration implies, which would be wrong against the real
 // kernel struct.
-//
-// The fentry argument is `struct sock *` per BTF, but we read srtt_us via
-// a forward cast to `struct tcp_sock *` (tcp_sock embeds struct sock as its
-// first member, like inet_connection_sock and inet_sock do — the cast is
-// safe). We deliberately do not declare struct sock at all: an empty
-// preserve-access-index struct trips an LLVM-14 BPF-backend SelectionDAG
-// crash, and we don't need to read any sock fields anyway.
 struct tcp_sock {
     __u32 srtt_us;
 } __attribute__((preserve_access_index));
+
+// Verifier-blessed type narrowing. tcp_rcv_established's first argument is
+// typed as struct sock * (size ~1232 bytes) per BTF. The verifier refuses
+// to read srtt_us via a plain (struct tcp_sock *)sk cast because that offset
+// (~1672 bytes) is "beyond struct sock" from the verifier's perspective —
+// even though tcp_sock embeds struct sock as its first member in actual
+// memory layout, the BPF type system has no way to know that.
+//
+// bpf_skc_to_tcp_sock checks at runtime that the sock is a TCP stream
+// socket and returns a struct tcp_sock * (or NULL). Its return BTF tells
+// the verifier the returned pointer is genuinely tcp_sock-typed, so the
+// srtt_us field load becomes legal. __ksym tells libbpf to resolve the
+// symbol from the running kernel's BTF at load time.
+extern struct tcp_sock *bpf_skc_to_tcp_sock(struct sock *sk) __ksym;
 
 // netscope_rx_bytes: per-CPU byte counter, single key (0). Userspace sums
 // across all possible CPUs at scrape time. Counter only — no eviction.
@@ -112,20 +124,30 @@ struct {
 // the previous segment's smoothed value — close enough for a histogram, and
 // avoids an fexit which would cost a return-probe stack frame per packet.
 //
-// CO-RE: direct field access through the preserve_access_index struct is
-// rewritten by libbpf at load time against the target kernel's actual
-// tcp_sock->srtt_us offset. No vmlinux.h required.
+// CO-RE: direct field access through the preserve_access_index tcp_sock
+// struct is rewritten by libbpf at load time against the target kernel's
+// actual offset. No vmlinux.h required.
 //
-// IMPORTANT: fentry/fexit programs MUST use direct memory access, not the
-// BPF_CORE_READ macro. That macro expands to bpf_probe_read_kernel(), which
-// the kernel verifier disallows for this program type — fentry has direct
-// access via function arguments by design, so the probe_read helpers are
-// forbidden. (Verified empirically: BPF_CORE_READ here loads but fails
-// attach with "program of this type cannot use helper bpf_probe_read".)
+// Two verifier traps to avoid:
+//   1. fentry/fexit programs MUST use direct memory access, not the
+//      BPF_CORE_READ macro — it expands to bpf_probe_read_kernel() which
+//      this program type forbids by design (fentry already has direct
+//      access via typed arguments).
+//   2. Direct cast (struct tcp_sock *)sk does NOT compile-pass the verifier
+//      either: it knows sk is struct sock (~1232 bytes) and rejects loads
+//      at offset ~1672. Use bpf_skc_to_tcp_sock to get a verifier-typed
+//      tcp_sock pointer; the helper checks at runtime that sk is actually
+//      a full TCP stream socket and returns NULL otherwise.
 SEC("fentry/tcp_rcv_established")
-int BPF_PROG(record_tcp_srtt, void *sk)
+int BPF_PROG(record_tcp_srtt, struct sock *sk)
 {
-    __u32 srtt_us = ((struct tcp_sock *)sk)->srtt_us;
+    struct tcp_sock *tsk = bpf_skc_to_tcp_sock(sk);
+    if (!tsk) {
+        // Not a TCP stream socket (or partial sock — e.g. request socks
+        // during the SYN/SYN-ACK handshake). Skip silently.
+        return 0;
+    }
+    __u32 srtt_us = tsk->srtt_us;
     if (srtt_us == 0) {
         // Pre-handshake or freshly reset connection — no SRTT sample yet.
         // Skipping keeps the histogram from being dominated by a bucket-0
