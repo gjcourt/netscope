@@ -98,7 +98,7 @@ Tracked at [#10](https://github.com/gjcourt/netscope/issues/10): add a kernel-lo
 - **fentry/fexit means BTF-typed direct access. No `bpf_probe_read*`.** Use it for kprobes/tracepoints/raw_tracepoints, not for fentry/fexit. `BPF_CORE_READ` is a `bpf_probe_read*` macro and inherits the same constraint.
 - **When reaching into a sub-type of a kernel struct from a BTF-typed program, always reach for a verifier-blessed narrowing helper first.** `bpf_skc_to_*`, `bpf_sk_fullsock`, `bpf_dynptr_*`, `bpf_rdonly_cast`. A C cast is not a narrowing helper.
 - **CI green is not loadability.** Until [#10](https://github.com/gjcourt/netscope/issues/10) lands, assume any BPF code change might be a deploy-time failure. Roll out behind a single-node canary before pushing the DaemonSet.
-- **Read the verifier log line one.** "helper call is not allowed in probe" and "access beyond struct X at off N" are different problems with different fixes. Don't fix-by-pattern-matching.
+- **Read the verifier log line one.** "cannot use helper bpf_probe_read" and "access beyond struct X at off N" are different problems with different fixes. Don't fix-by-pattern-matching.
 - **Document the trap inline.** A comment block above the program is cheaper than a postmortem — PR #11 confirmed this empirically.
 
 ## References
@@ -111,5 +111,5 @@ Tracked at [#10](https://github.com/gjcourt/netscope/issues/10): add a kernel-lo
 - Project plan: [brainstorm/03-001-ebpf-based-network-traffic-analyzer](https://github.com/gjcourt/brainstorm/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md)
 - Kernel docs:
   - [BPF program types: fentry/fexit](https://docs.kernel.org/bpf/libbpf/program_types.html) and `bpf-helpers(7)`
-  - [`bpf_skc_to_tcp_sock` and siblings](https://docs.kernel.org/bpf/helpers.html) — the "type cast" helpers section
+  - [`bpf_skc_to_tcp_sock` and siblings](https://man7.org/linux/man-pages/man7/bpf-helpers.7.html) — the "type cast" group in `bpf-helpers(7)`
   - [libbpf CO-RE](https://nakryiko.com/posts/bpf-core-reference-guide/) — Andrii Nakryiko's reference, especially the section on when `BPF_CORE_READ` is and isn't appropriate
