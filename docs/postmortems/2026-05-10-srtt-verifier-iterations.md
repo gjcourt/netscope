@@ -18,9 +18,9 @@ All times UTC.
 | When | PR | Change | Outcome |
 |---|---|---|---|
 | 2026-05-10 23:07 | [#7](https://github.com/gjcourt/netscope/pull/7) opened | `BPF_CORE_READ((struct tcp_sock *)sk, srtt_us)` | CI green, merged 23:16 |
-| 2026-05-10 ~23:20 | deploy on Talos node | — | Agent crashloops. Verifier log: `helper call is not allowed in probe`. fentry programs are not permitted to call `bpf_probe_read*`, and `BPF_CORE_READ` expands to exactly that. |
+| 2026-05-10 ~23:20 | deploy on Talos node | — | Agent crashloops. Verifier log: `program of this type cannot use helper bpf_probe_read#4`. fentry programs are not permitted to call `bpf_probe_read*`, and `BPF_CORE_READ` expands to exactly that. |
 | 2026-05-10 23:27 | [#8](https://github.com/gjcourt/netscope/pull/8) opened | direct field access: `((struct tcp_sock *)sk)->srtt_us` with a `preserve_access_index` shim struct | CI green, merged 23:34 |
-| 2026-05-10 ~23:40 | deploy | — | Agent crashloops. Verifier log: `invalid access to memory, off=1672 size=4 ... R1 type=trusted_ptr_ expected ... access beyond struct sock`. The verifier sees `sk` as `struct sock *` (~1232 bytes on this kernel) and refuses the load at offset ~1672. A C cast to `struct tcp_sock *` does not change the verifier's view of the pointer. |
+| 2026-05-10 ~23:40 | deploy | — | Agent crashloops. Verifier log: `permission denied: access beyond struct sock at off 1672 size 4`. The verifier sees `sk` as `struct sock *` (~1232 bytes on this kernel) and refuses the load at offset ~1672. A C cast to `struct tcp_sock *` does not change the verifier's view of the pointer. |
 | 2026-05-11 00:39 | [#9](https://github.com/gjcourt/netscope/pull/9) opened | `struct tcp_sock *tsk = bpf_skc_to_tcp_sock(sk); if (!tsk) return 0; tsk->srtt_us` | CI green, merged 00:47 |
 | 2026-05-11 ~00:50 | deploy | — | Verifier accepts. SRTT histogram flowing. Confirmed in Prometheus within one scrape interval. |
 | 2026-05-11 01:08 | [#11](https://github.com/gjcourt/netscope/pull/11) opened | DNS query latency histogram (separate fentry program) | First-try pass — applied lessons from #7/#8/#9 up front. |
@@ -110,6 +110,6 @@ Tracked at [#10](https://github.com/gjcourt/netscope/issues/10): add a kernel-lo
 - Issue [#10](https://github.com/gjcourt/netscope/issues/10) — kernel-load CI smoke
 - Project plan: [brainstorm/03-001-ebpf-based-network-traffic-analyzer](https://github.com/gjcourt/brainstorm/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md)
 - Kernel docs:
-  - [BPF program types: fentry/fexit](https://docs.kernel.org/bpf/prog_lsm.html) and `bpf-helpers(7)`
+  - [BPF program types: fentry/fexit](https://docs.kernel.org/bpf/libbpf/program_types.html) and `bpf-helpers(7)`
   - [`bpf_skc_to_tcp_sock` and siblings](https://docs.kernel.org/bpf/helpers.html) — the "type cast" helpers section
   - [libbpf CO-RE](https://nakryiko.com/posts/bpf-core-reference-guide/) — Andrii Nakryiko's reference, especially the section on when `BPF_CORE_READ` is and isn't appropriate
