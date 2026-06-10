@@ -71,8 +71,13 @@ struct sock {
 // Numeric values are stable across 6.x.
 #define NETSCOPE_ITER_IOVEC 0
 
+// iov_base points into user address space; we read it at runtime with
+// bpf_probe_read_user. The sparse `__user` annotation isn't a real clang
+// attribute (it's defined only under __CHECKER__), so for the BPF build it's
+// a plain void *. The user-vs-kernel distinction is enforced by the
+// bpf_probe_read_user helper, not the type.
 struct iovec {
-    void __attribute__((__user__)) *iov_base;
+    void *iov_base;
     __u64 iov_len;
 };
 

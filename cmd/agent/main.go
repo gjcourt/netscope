@@ -299,6 +299,25 @@ func run() error {
 		),
 	})
 
+	// Per-domain DNS latency breakdown (v2): correlate query/response events
+	// from the netscope_dns_events ringbuf in userspace and expose a
+	// per-suffix histogram alongside the in-kernel aggregate above.
+	dnsEventsMap := coll.Maps["netscope_dns_events"]
+	if dnsEventsMap == nil {
+		return errors.New("map netscope_dns_events not found in collection")
+	}
+	dnsBreakdown, err := newDNSBreakdownCollector(dnsEventsMap)
+	if err != nil {
+		return fmt.Errorf("dns breakdown ringbuf reader: %w", err)
+	}
+	prometheus.MustRegister(dnsBreakdown)
+
+	// Signal context drives both the ringbuf reader's lifetime and the
+	// shutdown select below.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go dnsBreakdown.run(ctx)
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -318,9 +337,6 @@ func run() error {
 			errCh <- err
 		}
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	select {
 	case <-ctx.Done():
