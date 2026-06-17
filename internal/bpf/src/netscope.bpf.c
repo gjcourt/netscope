@@ -202,10 +202,18 @@ struct {
 // actual offset. No vmlinux.h required.
 //
 // Two verifier traps to avoid:
-//   1. fentry/fexit programs MUST use direct memory access, not the
-//      BPF_CORE_READ macro — it expands to bpf_probe_read_kernel() which
-//      this program type forbids by design (fentry already has direct
-//      access via typed arguments).
+//   1. For a BTF-typed argument, prefer direct field access over BPF_CORE_READ.
+//      The hard rule the kernel enforces is narrower than "no probe reads": on
+//      x86 the *generic* bpf_probe_read (helper #4) is compiled out for tracing
+//      programs (CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE is unset), so a
+//      program that emits #4 is rejected at load ("cannot use helper
+//      bpf_probe_read#4"). BPF_CORE_READ can lower to #4 on older clang, which
+//      is the trap. The *explicit* bpf_probe_read_kernel()/_user() helpers
+//      (#113/#112) ARE permitted from fentry/fexit and are the right tool when
+//      you must dereference a pointer the verifier won't treat as a trusted
+//      PTR_TO_BTF_ID — see dns_emit_event below, and
+//      docs/postmortems/2026-06-16-dns-probe-read-helper4.md. For a srtt_us
+//      read straight off a typed arg, direct access is simplest.
 //   2. Direct cast (struct tcp_sock *)sk does NOT compile-pass the verifier
 //      either: it knows sk is struct sock (~1232 bytes) and rejects loads
 //      at offset ~1672. Use bpf_skc_to_tcp_sock to get a verifier-typed
@@ -454,6 +462,11 @@ dns_emit_event(struct sock *sk, struct msghdr *msg, __u8 event_type)
     // Read iter_type to gate on iovec flavor. For non-ITER_IOVEC flavors
     // the __iov field is not the right way to reach the data and we'd
     // either read garbage or fail the verifier on an out-of-bounds load.
+    //
+    // iter_type and __iov are fields of msg_iter, which is embedded directly
+    // in the BTF-typed `msg` fentry argument. Reading them as direct loads off
+    // the trusted PTR_TO_BTF_ID argument is the same established pattern the
+    // SRTT and sock_common reads use, and is safe across toolchains.
     __u8 iter_type = msg->msg_iter.iter_type;
     if (iter_type != NETSCOPE_ITER_IOVEC) {
         goto emit;
@@ -464,14 +477,38 @@ dns_emit_event(struct sock *sk, struct msghdr *msg, __u8 event_type)
         goto emit;
     }
 
-    // Direct field access via the preserve_access_index iovec shadow. fentry
-    // forbids bpf_probe_read_kernel (see the SRTT comment above), so we
-    // dereference iov directly. The verifier classifies pointers loaded out
-    // of BTF-typed kernel struct fields as PTR_TO_BTF_ID, which permits
-    // direct dereference; iov came from msg->msg_iter.__iov which is itself
-    // a field load against a BTF-typed msghdr argument.
-    void *base = (void *)iov->iov_base;
-    __u64 user_len = iov->iov_len;
+    // Read the iovec's base pointer and length out of KERNEL memory with an
+    // explicit bpf_probe_read_kernel.
+    //
+    // Why NOT a direct `iov->iov_base` dereference (this is the verifier trap
+    // that crashlooped #14 on the Talos 6.18.9 kernel):
+    //   `iov` is a pointer LOADED OUT OF a struct field (msg->msg_iter.__iov),
+    //   not a top-level fentry argument. Modern clang (>=17) lowers a CO-RE
+    //   field access through such a derived preserve_access_index pointer to a
+    //   direct typed load, which the verifier accepts as PTR_TO_BTF_ID. But
+    //   the production builder image (golang:1.23-bookworm) ships clang-14,
+    //   whose older BPF CO-RE lowering emits these same field reads as a
+    //   GENERIC bpf_probe_read (helper #4). Tracing programs
+    //   (BPF_PROG_TYPE_TRACING) are forbidden from calling bpf_probe_read#4 on
+    //   6.18, so the kernel rejects record_dns_query at load with
+    //   "program of this type cannot use helper bpf_probe_read#4".
+    //
+    // CI missed it because the kernel-smoke job compiled with ubuntu-latest's
+    // much-newer clang (direct load, no #4) rather than the bookworm clang-14
+    // the shipped image uses. The fix here is toolchain-independent: an
+    // EXPLICIT bpf_probe_read_kernel compiles to helper #113
+    // (bpf_probe_read_kernel) on every clang, and that helper IS permitted for
+    // tracing programs (unlike the generic #4). The iovec lives in kernel
+    // memory, so _kernel is the correct flavor; only iov_base's *target* is
+    // user memory (read with bpf_probe_read_user below).
+    void *base = NULL;
+    __u64 user_len = 0;
+    if (bpf_probe_read_kernel(&base, sizeof(base), &iov->iov_base) != 0) {
+        goto emit;
+    }
+    if (bpf_probe_read_kernel(&user_len, sizeof(user_len), &iov->iov_len) != 0) {
+        goto emit;
+    }
     if (!base || user_len == 0) {
         goto emit;
     }

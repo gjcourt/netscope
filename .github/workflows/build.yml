@@ -65,14 +65,28 @@ jobs:
   # attempt each attach the production agent performs. Catches verifier
   # rejections that the compile-only `lint` job above cannot see — see
   # docs/postmortems/2026-05-10-srtt-verifier-iterations.md for the trap this
-  # exists to plug.
+  # exists to plug, and docs/postmortems/2026-06-16-dns-probe-read-helper4.md
+  # for the toolchain-mismatch trap this job was hardened to plug.
   #
-  # Pinned to bzImage-v6.18-default from danobi/vmtest's test_assets. The
-  # production Talos nodes ship 6.18.x, and 6.18 includes every kernel symbol
-  # the agent traces (tcx is 6.6+, tcp_rcv_established and udp_recvmsg are
-  # long-standing GPL exports). If the kernel rename-shuffle ever drops one
-  # of those symbols the smoke surfaces it as a clear AttachTracing failure
-  # rather than a silent CI green / production red.
+  # Kernel: bzImage-v6.18-fedora38 from danobi/vmtest's test_assets. The
+  # production Talos nodes ship 6.18.x (Talos v1.12.4 → 6.18.9), and 6.18
+  # includes every kernel symbol the agent traces (tcx is 6.6+,
+  # tcp_rcv_established and udp_recvmsg are long-standing GPL exports). 6.18 is
+  # also a kernel that rejects bpf_probe_read#4 from tracing programs, which is
+  # exactly the regression class this smoke must catch; an older CI kernel
+  # would silently accept #4 and let it ship.
+  #
+  # Toolchain fidelity (THE fix for the #14 crashloop): the BPF object MUST be
+  # compiled with the SAME clang the shipped image uses, because the verifier
+  # only ever sees the bytecode that actually ships. The Dockerfile builds with
+  # clang from golang:1.23-bookworm (clang-14); bookworm clang-14 lowers some
+  # CO-RE field reads to the generic bpf_probe_read#4, whereas ubuntu-latest's
+  # newer clang emits direct typed loads. The previous version of this job ran
+  # `make bpf` with ubuntu-latest's clang, so it verified an object that was
+  # never the one we deployed — green CI, red production. We now compile the .o
+  # inside the bookworm builder image (same FROM as the Dockerfile) so the
+  # smoke tests byte-for-byte what ships. Keep this image tag in sync with the
+  # Dockerfile's builder stage.
   kernel-smoke:
     needs: lint
     runs-on: ubuntu-latest
@@ -88,14 +102,21 @@ jobs:
           go-version: "1.23"
           cache: true
 
-      - name: Install BPF toolchain
+      - name: Compile BPF object (bookworm clang — same as shipped image)
+        # Run `make bpf` inside golang:1.23-bookworm, the exact builder image
+        # the Dockerfile uses, so the .o the smoke loads is byte-for-byte the
+        # one we deploy. Compiling with ubuntu-latest's clang here is what let
+        # the bpf_probe_read#4 regression slip through in #14 — the CI clang
+        # emitted a direct load while the bookworm image emitted #4. Keep the
+        # image tag in sync with the Dockerfile builder FROM.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang llvm libbpf-dev linux-libc-dev
-
-      - name: Compile BPF object
-        run: make bpf
+          docker run --rm -v "$PWD":/src -w /src golang:1.23-bookworm bash -c '
+            set -euo pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-libc-dev
+            clang --version
+            make bpf
+          '
 
       - name: Build cismoke binary
         # Static binary so it runs against whatever libc (if any) the vmtest
