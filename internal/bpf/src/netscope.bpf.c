@@ -184,18 +184,23 @@ struct {
 // actual offset. No vmlinux.h required.
 //
 // Two verifier traps to avoid:
-//   1. For a BTF-typed argument, prefer direct field access over BPF_CORE_READ.
-//      The hard rule the kernel enforces is narrower than "no probe reads": on
-//      x86 the *generic* bpf_probe_read (helper #4) is compiled out for tracing
-//      programs (CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE is unset), so a
-//      program that emits #4 is rejected at load ("cannot use helper
-//      bpf_probe_read#4"). BPF_CORE_READ can lower to #4 on older clang, which
-//      is the trap. The *explicit* bpf_probe_read_kernel()/_user() helpers
-//      (#113/#112) ARE permitted from fentry/fexit and are the right tool when
-//      you must dereference a pointer the verifier won't treat as a trusted
-//      PTR_TO_BTF_ID — see dns_emit_event below, and
-//      docs/postmortems/2026-06-16-dns-probe-read-helper4.md. For a srtt_us
-//      read straight off a typed arg, direct access is simplest.
+//   1. For a BTF-typed argument, you MUST use direct field access — never a
+//      probe-read helper. Talos boots every node with lockdown=confidentiality
+//      (/sys/kernel/security/lockdown). Under that lockdown the kernel fails
+//      security_locked_down(LOCKDOWN_BPF_READ_KERNEL) and NULLs the probe_read
+//      protos for tracing programs, so fentry/fexit programs cannot call ANY
+//      probe_read variant — generic bpf_probe_read (#4), bpf_probe_read_kernel
+//      (#113), or bpf_probe_read_user (#112). The verifier reports all of them
+//      as "cannot use helper bpf_probe_read#4" regardless of which you called.
+//      (This is NOT the CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE story —
+//      that config IS set on Talos; lockdown is the gate.) Direct field access
+//      on a trusted PTR_TO_BTF_ID arg lowers to a plain ldx with no helper, so
+//      it is always legal; BPF_CORE_READ expands to bpf_probe_read_kernel, a
+//      helper call, and is forbidden here. A pointer the verifier won't treat
+//      as PTR_TO_BTF_ID therefore cannot be dereferenced at all from a tracing
+//      program on this kernel — which is why the per-domain DNS payload read was
+//      removed (see docs/postmortems/2026-06-16-dns-probe-read-helper4.md).
+//      For a srtt_us read straight off a typed arg, direct access is simplest.
 //   2. Direct cast (struct tcp_sock *)sk does NOT compile-pass the verifier
 //      either: it knows sk is struct sock (~1232 bytes) and rejects loads
 //      at offset ~1672. Use bpf_skc_to_tcp_sock to get a verifier-typed
