@@ -3,9 +3,7 @@
 // netscope: per-CPU byte counter on tcx ingress + per-CPU TCP retransmit
 // counter via fentry on tcp_retransmit_skb + per-CPU SRTT histogram via
 // fentry on tcp_rcv_established + per-CPU DNS query latency histogram via
-// fentry on udp_sendmsg / fexit on udp_recvmsg + per-domain DNS query
-// latency breakdown via a ringbuf carrying query/response payloads to
-// userspace (v2).
+// fentry on udp_sendmsg / fexit on udp_recvmsg.
 // Observation only — never alters packet disposition or socket state.
 //
 // This file is GPL-2.0 (single-file exception within an Apache-2.0 repo),
@@ -45,53 +43,37 @@ struct sock {
     struct sock_common __sk_common;
 } __attribute__((preserve_access_index));
 
-// Forward declarations for fexit signatures that take pointer args we never
-// dereference. We only need the names to type-check the BPF_PROG argument
-// list; the verifier doesn't require a body.
+// Forward declaration for the fentry/fexit signatures that take a msghdr
+// pointer arg we never dereference. We only need the name to type-check the
+// BPF_PROG argument list; the verifier doesn't require a body and we never
+// read any field off it.
 //
-// For the v2 per-domain DNS work we DO want to dereference msghdr (to reach
-// the iovec and read the on-the-wire DNS payload). We shadow the relevant
-// fields below with preserve_access_index so libbpf rewrites offsets against
-// the target kernel's BTF at load time. Field NAMES must match the kernel;
-// the layout is otherwise irrelevant to us.
+// NOTE (why we don't dereference msghdr): reaching the on-the-wire DNS
+// payload requires reading the iovec (kernel memory) and then the user
+// buffer it points at — i.e. bpf_probe_read_kernel + bpf_probe_read_user.
+// On the production Talos nodes ALL probe_read-family helpers
+// (#4 bpf_probe_read, #112 bpf_probe_read_user, #113 bpf_probe_read_kernel)
+// are unavailable to BPF_PROG_TYPE_TRACING programs — the verifier rejects
+// every one of them with the canonical "program of this type cannot use
+// helper bpf_probe_read#4" message regardless of which variant was called.
 //
-// We intentionally only model the subset of struct iov_iter we actually
-// touch: iter_type to gate on the iovec flavor, and the embedded __iov
-// pointer that ITER_IOVEC uses. ITER_UBUF and other flavors are not
-// supported in this revision (we drop the payload-read silently and the
-// userspace correlator just won't get a qname for those queries).
+// The gate is KERNEL LOCKDOWN, not the toolchain and not a CONFIG. The kernel
+// returns the probe_read proto for tracing programs only when
+// security_locked_down(LOCKDOWN_BPF_READ_KERNEL) >= 0 (kernel/trace/
+// bpf_trace.c). Talos boots every node with `lockdown=confidentiality`
+// (/proc/cmdline), so that check fails and the proto is NULL. A bare vmtest
+// VM boots without lockdown and so accepted the probe_read object — which is
+// exactly why the v2 per-domain payload feature passed kernel-smoke and then
+// crashlooped on the cluster. (The earlier "bookworm clang-14 lowers CO-RE to
+// #4" theory was wrong: switching to explicit bpf_probe_read_kernel/_user
+// still compiled to a probe_read helper, which lockdown rejects all the same.)
 //
-// Kernel constants (lib/iov_iter.c, include/linux/uio.h):
-//   ITER_IOVEC = 0  (struct iovec * via __iov)
-//   ITER_KVEC  = 1  (kernel iovec — different memory domain, skip)
-//   ITER_BVEC  = 2  (skip)
-//   ITER_XARRAY = 3 (skip)
-//   ITER_DISCARD = 4 (no data)
-//   ITER_UBUF = 5   (single user buffer, ubuf field — skip in v1)
-// Numeric values are stable across 6.x.
-#define NETSCOPE_ITER_IOVEC 0
-
-// iov_base points into user address space; we read it at runtime with
-// bpf_probe_read_user. The sparse `__user` annotation isn't a real clang
-// attribute (it's defined only under __CHECKER__), so for the BPF build it's
-// a plain void *. The user-vs-kernel distinction is enforced by the
-// bpf_probe_read_user helper, not the type.
-struct iovec {
-    void *iov_base;
-    __u64 iov_len;
-};
-
-struct iov_iter {
-    __u8 iter_type;
-    // __iov is the first iovec pointer for ITER_IOVEC. iov_iter is a
-    // tagged union internally; we only read this field, and only after
-    // gating on iter_type == ITER_IOVEC.
-    const struct iovec *__iov;
-} __attribute__((preserve_access_index));
-
-struct msghdr {
-    struct iov_iter msg_iter;
-} __attribute__((preserve_access_index));
+// The per-domain payload breakdown is therefore impossible from a tracing
+// program on a locked-down kernel and is removed here; the in-kernel aggregate
+// DNS latency histogram below uses only direct BTF-typed field loads + map
+// ops, which load cleanly. See
+// docs/postmortems/2026-06-16-dns-probe-read-helper4.md.
+struct msghdr;
 
 // Shadowed kernel struct declaration for CO-RE. We don't include a full
 // vmlinux.h (it'd be ~5-10MB checked into the repo); instead we declare
@@ -345,218 +327,6 @@ dns_build_key(struct dns_flow_key *k, struct sock *sk)
     k->dport = sk->__sk_common.skc_dport;
 }
 
-// =============================================================================
-// Per-domain DNS query latency (v2): ringbuf-fed userspace correlation
-// =============================================================================
-//
-// In addition to the in-kernel 4-tuple latency histogram above, we emit
-// ringbuf events carrying the raw DNS payload (capped at 256 bytes — enough
-// for the question section in every reasonable DNS query). Userspace parses
-// the qname, applies suffix bucketing for cardinality control, and emits a
-// per-suffix Prometheus histogram. The in-kernel histogram is preserved
-// unchanged for dashboard backward compatibility.
-//
-// Why ringbuf-from-kernel rather than parse-in-kernel:
-//   - bpf_probe_read_user on the iovec is well-defined in fentry, but the
-//     iov_iter union flavors (ITER_IOVEC vs ITER_UBUF vs ITER_KVEC/BVEC)
-//     change the layout of the iovec lookup. We handle only ITER_IOVEC here
-//     and silently skip the rest.
-//   - DNS label parsing requires bounded loops and pointer-following over
-//     untrusted on-wire data. The verifier hates this. Userspace can do it
-//     safely with the full Go standard library and good test coverage.
-//
-// Cardinality control happens entirely in userspace (see cmd/agent/dns.go):
-// suffix bucketing (last 2-3 labels), LRU cap of 100 suffixes, "_other_"
-// bucket for everything beyond that.
-
-// netscope_dns_events: ringbuf carrying raw DNS payloads to userspace. 256KB
-// is sized for the typical homelab query rate (low hundreds/sec across all
-// pods). At ~280 bytes per event (4-tuple + header + 256 payload) that's
-// ~900 events buffered before backpressure, well above the userspace reader
-// drain interval. If we ever saturate (e.g. a misbehaving resolver loop),
-// bpf_ringbuf_output returns -ENOSPC and we drop the event silently — the
-// in-kernel aggregate histogram still captures the latency, we just miss
-// the per-domain breakdown for that event.
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
-} netscope_dns_events SEC(".maps");
-
-// Event types emitted on the ringbuf. The userspace correlator pairs query
-// events to response events by 4-tuple within a short window.
-#define NETSCOPE_DNS_EVENT_QUERY    1
-#define NETSCOPE_DNS_EVENT_RESPONSE 2
-
-// 256 bytes is enough for the full question section in every realistic DNS
-// query: max QNAME is 255 bytes (RFC 1035) + 4 bytes QTYPE/QCLASS + 12-byte
-// header = 271. We clamp at 256 because we only need the qname (first
-// question), which lives within the first ~270 bytes for any reasonable
-// query; truncating QTYPE is fine.
-#define NETSCOPE_DNS_PAYLOAD_BYTES 256
-
-// dns_event: ringbuf record shape. Keep this layout in sync with
-// cmd/agent/dns.go (the userspace parser uses unsafe-cast or
-// encoding/binary to read the same fields).
-//
-// Field order is chosen to minimize padding on x86_64 / arm64 (8-byte and
-// 4-byte fields first, then __u16, then __u8). We zero the whole struct
-// before populating so the verifier sees a fully-initialized event.
-struct dns_event {
-    __u64 timestamp_ns;        // bpf_ktime_get_ns at emission point
-    __be32 saddr;
-    __be32 daddr;
-    __u16  sport;              // host byte order (matches dns_flow_key)
-    __be16 dport;              // network byte order
-    __u8   event_type;         // QUERY or RESPONSE
-    __u8   payload_truncated;  // 1 if the userland buffer was shorter than we read
-    __u16  payload_len;        // actual bytes valid in payload[]
-    __u8   payload[NETSCOPE_DNS_PAYLOAD_BYTES];
-};
-
-// dns_event_scratch: per-CPU staging area for the event struct. Defining
-// `struct dns_event` on the stack (~280 bytes) would consume most of the
-// 512-byte BPF stack budget; putting it in a per-CPU array map with a
-// single key (0) lets the verifier track initialization at byte granularity
-// without exhausting the stack. This is the canonical pattern for tracing
-// programs that emit large ringbuf records.
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, struct dns_event);
-} netscope_dns_event_scratch SEC(".maps");
-
-// Emit a ringbuf event for the given sock + msghdr. Reads up to
-// NETSCOPE_DNS_PAYLOAD_BYTES of user data from the first iovec when the
-// msg_iter flavor is ITER_IOVEC. Silently drops on:
-//   - non-ITER_IOVEC iter flavors (ITER_UBUF, ITER_KVEC, etc.)
-//   - bpf_probe_read_user failure (user munmap'd, fault, etc.)
-//   - ringbuf full (-ENOSPC from bpf_ringbuf_output)
-//
-// Returning void rather than int because every caller ignores the result;
-// emission is best-effort relative to the aggregate histogram.
-static __always_inline void
-dns_emit_event(struct sock *sk, struct msghdr *msg, __u8 event_type)
-{
-    __u32 zero = 0;
-    struct dns_event *e = bpf_map_lookup_elem(&netscope_dns_event_scratch, &zero);
-    if (!e) {
-        // Per-CPU array with one slot is allocated at load time; lookup
-        // never fails in practice. The verifier still requires the check.
-        return;
-    }
-
-    // Zero header bytes only — we'll set payload_len based on what we
-    // actually read, and the trailing payload bytes don't need to be
-    // pre-zeroed because we send `sizeof(header) + payload_len` to ringbuf,
-    // not the full struct size.
-    e->timestamp_ns = bpf_ktime_get_ns();
-    e->saddr = sk->__sk_common.skc_rcv_saddr;
-    e->daddr = sk->__sk_common.skc_daddr;
-    e->sport = sk->__sk_common.skc_num;
-    e->dport = sk->__sk_common.skc_dport;
-    e->event_type = event_type;
-    e->payload_truncated = 0;
-    e->payload_len = 0;
-
-    // Read iter_type to gate on iovec flavor. For non-ITER_IOVEC flavors
-    // the __iov field is not the right way to reach the data and we'd
-    // either read garbage or fail the verifier on an out-of-bounds load.
-    //
-    // iter_type and __iov are fields of msg_iter, which is embedded directly
-    // in the BTF-typed `msg` fentry argument. Reading them as direct loads off
-    // the trusted PTR_TO_BTF_ID argument is the same established pattern the
-    // SRTT and sock_common reads use, and is safe across toolchains.
-    __u8 iter_type = msg->msg_iter.iter_type;
-    if (iter_type != NETSCOPE_ITER_IOVEC) {
-        goto emit;
-    }
-
-    const struct iovec *iov = msg->msg_iter.__iov;
-    if (!iov) {
-        goto emit;
-    }
-
-    // Read the iovec's base pointer and length out of KERNEL memory with an
-    // explicit bpf_probe_read_kernel.
-    //
-    // Why NOT a direct `iov->iov_base` dereference (this is the verifier trap
-    // that crashlooped #14 on the Talos 6.18.9 kernel):
-    //   `iov` is a pointer LOADED OUT OF a struct field (msg->msg_iter.__iov),
-    //   not a top-level fentry argument. Modern clang (>=17) lowers a CO-RE
-    //   field access through such a derived preserve_access_index pointer to a
-    //   direct typed load, which the verifier accepts as PTR_TO_BTF_ID. But
-    //   the production builder image (golang:1.23-bookworm) ships clang-14,
-    //   whose older BPF CO-RE lowering emits these same field reads as a
-    //   GENERIC bpf_probe_read (helper #4). Tracing programs
-    //   (BPF_PROG_TYPE_TRACING) are forbidden from calling bpf_probe_read#4 on
-    //   6.18, so the kernel rejects record_dns_query at load with
-    //   "program of this type cannot use helper bpf_probe_read#4".
-    //
-    // CI missed it because the kernel-smoke job compiled with ubuntu-latest's
-    // much-newer clang (direct load, no #4) rather than the bookworm clang-14
-    // the shipped image uses. The fix here is toolchain-independent: an
-    // EXPLICIT bpf_probe_read_kernel compiles to helper #113
-    // (bpf_probe_read_kernel) on every clang, and that helper IS permitted for
-    // tracing programs (unlike the generic #4). The iovec lives in kernel
-    // memory, so _kernel is the correct flavor; only iov_base's *target* is
-    // user memory (read with bpf_probe_read_user below).
-    void *base = NULL;
-    __u64 user_len = 0;
-    if (bpf_probe_read_kernel(&base, sizeof(base), &iov->iov_base) != 0) {
-        goto emit;
-    }
-    if (bpf_probe_read_kernel(&user_len, sizeof(user_len), &iov->iov_len) != 0) {
-        goto emit;
-    }
-    if (!base || user_len == 0) {
-        goto emit;
-    }
-
-    // Clamp the read to our payload buffer size. The verifier needs the
-    // size argument to bpf_probe_read_user to be a compile-time-bounded
-    // value the verifier can prove fits in the destination; we use a
-    // fixed constant.
-    __u32 to_read = NETSCOPE_DNS_PAYLOAD_BYTES;
-    if (user_len < to_read) {
-        to_read = (__u32)user_len;
-    } else {
-        e->payload_truncated = 1;
-    }
-
-    // bpf_probe_read_user is fentry-legal (unlike bpf_probe_read which is
-    // restricted to kprobe-class programs on modern kernels). It returns 0
-    // on success and -EFAULT on user-page fault. The verifier requires the
-    // size to be a constant or a register the verifier proved fits the
-    // destination buffer; NETSCOPE_DNS_PAYLOAD_BYTES is a #define so the
-    // bound is propagated through `to_read`'s upper bound below.
-    //
-    // We pass the fixed NETSCOPE_DNS_PAYLOAD_BYTES rather than to_read on
-    // older verifiers that don't track the upper bound of to_read; reading
-    // a few extra bytes that may be uninitialized is fine for DNS framing
-    // (we trim with payload_len in userspace) and far safer than fighting
-    // the verifier here. Trade: payload[payload_len..] may carry garbage.
-    long ret = bpf_probe_read_user(e->payload, NETSCOPE_DNS_PAYLOAD_BYTES, base);
-    if (ret == 0) {
-        e->payload_len = (__u16)to_read;
-    }
-    // On ret != 0 (e.g. user page faulted out): payload_len stays 0 and
-    // userspace will skip qname parsing for this event but still see the
-    // 4-tuple correlation.
-
-emit:
-    // BPF_RB_NO_WAKEUP would let us batch wakeups; default flags (0) wakes
-    // the userspace epoll loop opportunistically per the kernel's heuristic.
-    // For our event rates (sub-1k/sec) the default is fine.
-    // Always send the full struct (fixed size). Variable-length output
-    // would require bpf_ringbuf_reserve/_submit with a dynamic size, which
-    // the verifier accepts but complicates the staging-buffer pattern.
-    // Userspace truncates to payload_len before parsing. The fixed-size
-    // trade is ~270 bytes of ringbuf bandwidth per event vs ~12+payload_len
-    // for the dynamic flavor; at <1k events/sec the difference is noise.
-    bpf_ringbuf_output(&netscope_dns_events, e, sizeof(*e), 0);
-}
-
 // fentry on udp_sendmsg. Signature is:
 //     int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 // We only need sk. We deliberately ignore IPv6 (udpv6_sendmsg is a separate
@@ -583,11 +353,6 @@ int BPF_PROG(record_dns_query, struct sock *sk, struct msghdr *msg)
     // query is what we care about. The stale entry would otherwise pin
     // a slot until eviction.
     bpf_map_update_elem(&netscope_dns_query_starts, &key, &now, BPF_ANY);
-
-    // Emit the query payload to userspace for per-domain breakdown.
-    // Failure is silent: the in-kernel aggregate histogram still records
-    // this query/response pair regardless.
-    dns_emit_event(sk, msg, NETSCOPE_DNS_EVENT_QUERY);
     return 0;
 }
 
@@ -652,11 +417,5 @@ int BPF_PROG(record_dns_response, struct sock *sk, struct msghdr *msg,
     if (cell) {
         __sync_fetch_and_add(cell, 1);
     }
-
-    // Emit the response payload to userspace. Lets the per-domain
-    // correlator close the loop on this 4-tuple even if the query event
-    // dropped on the ringbuf (the response carries the qname too in the
-    // echoed Question section, per RFC 1035 §4.1.1).
-    dns_emit_event(sk, msg, NETSCOPE_DNS_EVENT_RESPONSE);
     return 0;
 }

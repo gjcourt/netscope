@@ -299,24 +299,18 @@ func run() error {
 		),
 	})
 
-	// Per-domain DNS latency breakdown (v2): correlate query/response events
-	// from the netscope_dns_events ringbuf in userspace and expose a
-	// per-suffix histogram alongside the in-kernel aggregate above.
-	dnsEventsMap := coll.Maps["netscope_dns_events"]
-	if dnsEventsMap == nil {
-		return errors.New("map netscope_dns_events not found in collection")
-	}
-	dnsBreakdown, err := newDNSBreakdownCollector(dnsEventsMap)
-	if err != nil {
-		return fmt.Errorf("dns breakdown ringbuf reader: %w", err)
-	}
-	prometheus.MustRegister(dnsBreakdown)
+	// NOTE: the v2 per-domain DNS breakdown (a ringbuf carrying raw DNS
+	// payloads parsed in userspace) was removed. Reading the payload from a
+	// tracing program requires bpf_probe_read_kernel/_user, and Talos boots
+	// every node with lockdown=confidentiality, which makes the kernel forbid
+	// ALL probe_read-family helpers in BPF_PROG_TYPE_TRACING programs
+	// (rejected as "bpf_probe_read#4"). The in-kernel aggregate DNS latency
+	// histogram above is unaffected. See
+	// docs/postmortems/2026-06-16-dns-probe-read-helper4.md.
 
-	// Signal context drives both the ringbuf reader's lifetime and the
-	// shutdown select below.
+	// Signal context drives the shutdown select below.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go dnsBreakdown.run(ctx)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
