@@ -64,28 +64,40 @@ jobs:
   # kernel-smoke: load the compiled BPF .o against a real kernel in a VM and
   # attempt each attach the production agent performs. Catches verifier
   # rejections that the compile-only `lint` job above cannot see — see
-  # docs/postmortems/2026-05-10-srtt-verifier-iterations.md for the trap this
-  # exists to plug, and docs/postmortems/2026-06-16-dns-probe-read-helper4.md
-  # for the toolchain-mismatch trap this job was hardened to plug.
+  # docs/postmortems/2026-05-10-srtt-verifier-iterations.md and
+  # docs/postmortems/2026-06-16-dns-probe-read-helper4.md.
   #
   # Kernel: bzImage-v6.18-fedora38 from danobi/vmtest's test_assets. The
   # production Talos nodes ship 6.18.x (Talos v1.12.4 → 6.18.9), and 6.18
   # includes every kernel symbol the agent traces (tcx is 6.6+,
-  # tcp_rcv_established and udp_recvmsg are long-standing GPL exports). 6.18 is
-  # also a kernel that rejects bpf_probe_read#4 from tracing programs, which is
-  # exactly the regression class this smoke must catch; an older CI kernel
-  # would silently accept #4 and let it ship.
+  # tcp_rcv_established and udp_recvmsg are long-standing GPL exports). It is
+  # also built with CONFIG_DEBUG_INFO_BTF=y so fentry/fexit programs load.
   #
-  # Toolchain fidelity (THE fix for the #14 crashloop): the BPF object MUST be
-  # compiled with the SAME clang the shipped image uses, because the verifier
-  # only ever sees the bytecode that actually ships. The Dockerfile builds with
-  # clang from golang:1.23-bookworm (clang-14); bookworm clang-14 lowers some
-  # CO-RE field reads to the generic bpf_probe_read#4, whereas ubuntu-latest's
-  # newer clang emits direct typed loads. The previous version of this job ran
-  # `make bpf` with ubuntu-latest's clang, so it verified an object that was
-  # never the one we deployed — green CI, red production. We now compile the .o
-  # inside the bookworm builder image (same FROM as the Dockerfile) so the
-  # smoke tests byte-for-byte what ships. Keep this image tag in sync with the
+  # kernel_args: lockdown=confidentiality — THIS is the load-bearing fix for
+  # the DNS bpf_probe_read#4 crashloop, and it is NOT optional. The root cause
+  # was NOT a toolchain/clang difference (that earlier theory was wrong): the
+  # kernel gates the probe_read-family helpers for tracing programs behind
+  #
+  #   case BPF_FUNC_probe_read:
+  #     return security_locked_down(LOCKDOWN_BPF_READ_KERNEL) < 0
+  #            ? NULL : &bpf_probe_read_compat_proto;   // kernel/trace/bpf_trace.c
+  #
+  # Talos boots every node with `lockdown=confidentiality` (see /proc/cmdline
+  # on the cluster), which makes security_locked_down(LOCKDOWN_BPF_READ_KERNEL)
+  # return < 0, so the proto is NULL and ANY probe_read variant
+  # (#4 bpf_probe_read, #112 bpf_probe_read_user, #113 bpf_probe_read_kernel)
+  # is rejected from fentry/fexit with "program of this type cannot use helper
+  # bpf_probe_read#4". A vmtest VM boots WITHOUT lockdown by default, so it
+  # happily accepted the probe_read object — that is exactly why the v2
+  # per-domain DNS feature passed kernel-smoke and then crashlooped on the
+  # cluster. Booting the smoke VM with lockdown=confidentiality reproduces the
+  # Talos gate on the stock fedora38 kernel (verified: the pre-fix object is
+  # rejected with bpf_probe_read#4 only when this arg is present). Do NOT
+  # remove this arg.
+  #
+  # Toolchain fidelity is still worth keeping: we compile the .o with the same
+  # bookworm clang-14 the shipped image uses (below), so the smoke verifies
+  # byte-for-byte what we deploy. Keep this image tag in sync with the
   # Dockerfile's builder stage.
   kernel-smoke:
     needs: lint
@@ -142,6 +154,11 @@ jobs:
           # other vmtest-managed kernel images listed at
           # https://github.com/danobi/vmtest/releases/tag/test_assets
           kernel_url: https://github.com/danobi/vmtest/releases/download/test_assets/bzImage-v6.18-fedora38
+          # Reproduce the Talos lockdown gate that rejects probe_read helpers
+          # in tracing programs. Without this the smoke is a false-green for the
+          # entire bpf_probe_read#{4,112,113} regression class. See the long
+          # comment above this job for the kernel-source gate this exercises.
+          kernel_args: lockdown=confidentiality
           # Absolute path; vmtest-action mirrors the host workspace into the
           # guest, so $GITHUB_WORKSPACE resolves the same way inside the VM.
           command: ${{ github.workspace }}/bin/cismoke
