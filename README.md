@@ -8,7 +8,7 @@ Targets signals **not** covered by Cilium/Hubble: TCP retransmits, smoothed RTT,
 
 ## Status
 
-Phase 0 (feasibility spike). See [brainstorm 03-001](https://github.com/gjcourt/brainstorm/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md) for the full plan.
+Phase 0 (feasibility spike). See [lab 03-001](https://github.com/gjcourt/lab/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md) for the full plan.
 
 What works today:
 

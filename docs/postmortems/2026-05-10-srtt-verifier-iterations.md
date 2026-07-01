@@ -108,7 +108,7 @@ Tracked at [#10](https://github.com/gjcourt/netscope/issues/10): add a kernel-lo
 - PR [#9](https://github.com/gjcourt/netscope/pull/9) — switch to `bpf_skc_to_tcp_sock`
 - PR [#11](https://github.com/gjcourt/netscope/pull/11) — DNS query latency (clean first-try)
 - Issue [#10](https://github.com/gjcourt/netscope/issues/10) — kernel-load CI smoke
-- Project plan: [brainstorm/03-001-ebpf-based-network-traffic-analyzer](https://github.com/gjcourt/brainstorm/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md)
+- Project plan: [lab/03-001-ebpf-based-network-traffic-analyzer](https://github.com/gjcourt/lab/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md)
 - Kernel docs:
   - [BPF program types: fentry/fexit](https://docs.kernel.org/bpf/libbpf/program_types.html) and `bpf-helpers(7)`
   - [`bpf_skc_to_tcp_sock` and siblings](https://man7.org/linux/man-pages/man7/bpf-helpers.7.html) — the "type cast" group in `bpf-helpers(7)`
