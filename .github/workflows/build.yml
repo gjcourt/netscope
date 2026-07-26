@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -183,6 +184,7 @@ jobs:
         id: tags
         run: |
           echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
             echo "branch=main" >> "$GITHUB_OUTPUT"
           else
@@ -196,10 +198,13 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: ${{ github.event_name == 'push' }}
-          load: ${{ github.event_name != 'push' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
           tags: |
             ghcr.io/gjcourt/netscope:${{ steps.tags.outputs.branch }}
             ghcr.io/gjcourt/netscope:${{ steps.tags.outputs.sha }}
+            ghcr.io/gjcourt/netscope:${{ steps.tags.outputs.date }}
+            ghcr.io/gjcourt/netscope:${{ steps.tags.outputs.date }}-${{ steps.tags.outputs.sha }}
+            ghcr.io/gjcourt/netscope:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
