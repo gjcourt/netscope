@@ -6,6 +6,8 @@ A per-node DaemonSet that attaches eBPF programs to host network interfaces and 
 
 Targets signals **not** covered by Cilium/Hubble: TCP retransmits, smoothed RTT, DNS resolver-side latency, and traffic outside Cilium's view (host-network, node-to-node management plane, off-cluster LAN).
 
+For a full architecture reference — the userspace↔kernel split, the BPF program/map inventory, the end-to-end scrape flow, and the design decisions behind them — see [`docs/architecture.md`](docs/architecture.md).
+
 ## Status
 
 Phase 0 (feasibility spike). See [lab 03-001](https://github.com/gjcourt/lab/blob/main/03-homelab-automation/03-001-ebpf-based-network-traffic-analyzer.md) for the full plan.
