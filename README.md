@@ -40,8 +40,9 @@ Needs: a Kubernetes cluster with a BTF-enabled kernel (`CONFIG_DEBUG_INFO_BTF=y`
 
 ```bash
 git clone https://github.com/gjcourt/netscope && cd netscope
-helm install netscope deploy/helm/netscope --namespace netscope --create-namespace
-kubectl -n netscope port-forward ds/netscope-agent 9101:9101 &
+helm install netscope deploy/helm/netscope --namespace netscope --create-namespace \
+  --set image.tag=latest   # chart default tag (appVersion 0.1.0) is not published
+kubectl -n netscope port-forward ds/netscope 9101:9101 &
 curl -s localhost:9101/metrics | grep ^netscope_
 ```
 
@@ -76,7 +77,7 @@ make helm-template  # render the chart with default values
 
 The image is amd64-only: the BPF object is compiled with `-D__TARGET_ARCH_x86`. Local Docker builds from arm64 hosts hit QEMU/Go segfaults, so CI (`.github/workflows/build.yml`) is the build path — it pushes to `ghcr.io/gjcourt/netscope` on push to `main`.
 
-CI runs two jobs on every PR: `lint` (compile the BPF object, `gofmt`, `go vet`, `go test`, a `go mod tidy` diff, `helm lint` + `helm template`) and `kernel-smoke`, which loads the compiled `.o` and attempts every attach (`cmd/cismoke`) against a real 6.18 kernel in a VM booted with `lockdown=confidentiality`. That boot flag reproduces a Talos-specific gate that rejects the `bpf_probe_read` helper family in tracing programs — compile-only checks can't see it, and it's caused two real regressions (see `docs/postmortems/`). Don't weaken it. See [`AGENTS.md`](AGENTS.md) for repo conventions.
+Besides the `image` build (load-only on PRs), CI runs two jobs on every PR: `lint` (compile the BPF object, `gofmt`, `go vet`, `go test`, a `go mod tidy` diff, `helm lint` + `helm template`) and `kernel-smoke`, which loads the compiled `.o` and attempts every attach (`cmd/cismoke`) against a real 6.18 kernel in a VM booted with `lockdown=confidentiality`. That boot flag reproduces a Talos-specific gate that rejects the `bpf_probe_read` helper family in tracing programs — compile-only checks can't see it, and it's caused two real regressions (see `docs/postmortems/`). Don't weaken it. See [`AGENTS.md`](AGENTS.md) for repo conventions.
 
 ## Deployment
 
