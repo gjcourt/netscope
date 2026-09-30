@@ -8,8 +8,9 @@ fullnameOverride: ""
 
 image:
   repository: ghcr.io/gjcourt/netscope
-  # tag defaults to .Chart.appVersion when empty
-  tag: ""
+  # A published tag (the one the homelab runs). Empty would fall back to
+  # .Chart.appVersion (0.1.0), which is not published to ghcr.
+  tag: "2026-07-26-c14b782"
   pullPolicy: IfNotPresent
 
 # imagePullSecrets is a list of secret references for pulling the agent
