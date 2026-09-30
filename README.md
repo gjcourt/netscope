@@ -40,8 +40,7 @@ Needs: a Kubernetes cluster with a BTF-enabled kernel (`CONFIG_DEBUG_INFO_BTF=y`
 
 ```bash
 git clone https://github.com/gjcourt/netscope && cd netscope
-helm install netscope deploy/helm/netscope --namespace netscope --create-namespace \
-  --set image.tag=latest   # chart default tag (appVersion 0.1.0) is not published
+helm install netscope deploy/helm/netscope --namespace netscope --create-namespace
 kubectl -n netscope port-forward ds/netscope 9101:9101 &
 curl -s localhost:9101/metrics | grep ^netscope_
 ```
