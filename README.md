@@ -5,7 +5,7 @@ eBPF-based network traffic analyzer for the Talos homelab, exposing kernel-level
 
 Cilium's Hubble reports what crosses the pod network, but not host-network traffic, node-to-node control-plane paths outside the mesh, or *why* a connection is slow rather than that it happened. netscope is a per-node DaemonSet that attaches eBPF programs to a host interface and a handful of kernel TCP/UDP functions, aggregates the results in per-CPU BPF maps, and exposes them as Prometheus metrics: TCP retransmits, smoothed RTT, DNS resolver-side latency, and byte counts on interfaces Cilium doesn't see.
 
-**Status:** running in the homelab staging environment (`netscope-stage`, all 6 nodes) since 2026-05-10, scraped by Prometheus every 30s with alerting and a Grafana dashboard; there is no separate production environment for this app. See the [homelab runbook](https://github.com/gjcourt/homelab/blob/master/docs/operations/apps/netscope.md).
+**Status:** running in the homelab staging environment (`netscope-stage`, all 4 nodes) since 2026-05-10, scraped by Prometheus every 30s with alerting and a Grafana dashboard; there is no separate production environment for this app. See the [homelab runbook](https://github.com/gjcourt/homelab/blob/master/docs/operations/apps/netscope.md).
 
 ## Why
 
