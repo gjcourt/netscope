@@ -84,4 +84,4 @@ netscope runs as a DaemonSet in the `netscope-stage` namespace on every cluster 
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE). `internal/bpf/src/netscope.bpf.c` is the one exception, licensed GPL-2.0 (see the SPDX header in that file), as required by the GPL-only BPF helpers and kernel symbols it uses.
+[Apache-2.0](LICENSE), except `internal/bpf/src/netscope.bpf.c`, which is GPL-2.0 (see its SPDX header) because it uses GPL-only BPF helpers and kernel symbols.
